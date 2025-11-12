@@ -1,0 +1,45 @@
+# Node modules
+node_modules/
+
+# Logs
+logs/
+ignorelogs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+out/
+release/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Firebase config (если содержит секреты - раскомментируйте)
+# config/firebase.config.js
+
+# Electron builder
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Temporary files
+*.tmp
+*.temp
+
+# Environment variables
+.env
+.env.local

@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>VibeChat - Modern Glass</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="splashScreen" class="splash-screen">
+  <div class="splash-background">
+    <div class="splash-grid"></div>
+    <div class="splash-particles">
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+      <div class="particle"></div>
+    </div>
+  </div>
+  <div class="splash-content">
+    <div class="splash-logo">
+      <div class="logo-circle"></div>
+      <div class="logo-pulse"></div>
+    </div>
+    <h1 class="splash-title">VibeChat</h1>
+    <div class="splash-subtitle">чистый вайб</div>
+  </div>
+</div>
+
+<!-- Окно авторизации -->
+<div id="authWindow" class="auth-window">
+  <div class="auth-container">
+    <button id="authCloseBtn" class="auth-close-btn" title="Закрыть приложение">✖</button>
+    <div class="auth-header">
+      <h1>VibeChat</h1>
+      <p class="auth-subtitle">Добро пожаловать!</p>
+    </div>
+    
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="loginTab">Войти</button>
+      <button class="auth-tab" id="registerTab">Регистрация</button>
+    </div>
+    
+    <div class="auth-content">
+      <!-- Форма входа -->
+            <form id="loginForm" class="auth-form active">
+              <div class="auth-input-group">
+                <label for="loginEmail">Email или никнейм</label>
+                <input type="text" id="loginEmail" placeholder="example@mail.com или ваш никнейм" required>
+              </div>
+        <div class="auth-input-group">
+          <label for="loginPassword">Пароль</label>
+          <input type="password" id="loginPassword" placeholder="Введите пароль" required>
+        </div>
+        <div id="loginError" class="auth-error"></div>
+        <button type="submit" class="auth-submit-btn" id="loginSubmitBtn">Войти</button>
+      </form>
+      
+      <!-- Форма регистрации -->
+      <form id="registerForm" class="auth-form">
+        <div class="auth-input-group">
+          <label for="registerEmail">Email</label>
+          <input type="email" id="registerEmail" placeholder="example@mail.com" required>
+        </div>
+        <div class="auth-input-group">
+          <label for="registerNickname">Никнейм</label>
+          <input type="text" id="registerNickname" placeholder="Ваш никнейм" required maxlength="15">
+        </div>
+        <div class="auth-input-group">
+          <label for="registerPassword">Пароль</label>
+          <input type="password" id="registerPassword" placeholder="Минимум 6 символов" required minlength="6">
+        </div>
+        <div class="auth-input-group">
+          <label for="registerPasswordConfirm">Подтвердите пароль</label>
+          <input type="password" id="registerPasswordConfirm" placeholder="Повторите пароль" required minlength="6">
+        </div>
+        <div id="registerError" class="auth-error"></div>
+        <button type="submit" class="auth-submit-btn" id="registerSubmitBtn">Зарегистрироваться</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="app-content" id="appContent" style="display: none;">
+<div class="title-bar">
+  <div class="title-bar-left">
+    <h1>VibeChat</h1>
+    <div id="connectionStatus" class="connection-status" title="Состояние подключения">
+      <span class="connection-dot"></span>
+      <span class="connection-text">Подключение...</span>
+    </div>
+  </div>
+  <div class="title-bar-buttons">
+    <button id="createRoomBtn" class="title-bar-action-btn" title="Создать комнату">Создать комнату</button>
+    <button id="findRoomBtn" class="title-bar-action-btn" title="Найти комнату">Найти комнату</button>
+    <button id="addFriendBtnTitle" class="title-bar-action-btn" title="Добавить друга">Добавить друга</button>
+    <button id="notificationsBtn" class="notifications-btn title-bar-btn" title="Уведомления">
+      <span id="notificationsBadge" class="notifications-badge" style="display: none;">0</span>
+      🔔
+    </button>
+    <button id="consoleBtn" class="title-bar-action-btn" title="Открыть консоль разработчика">📟</button>
+    <button class="minimize-btn" id="minimizeBtn">−</button>
+    <button class="close-btn" id="closeBtn">✖</button>
+  </div>
+</div>
+
+<div class="container">
+  <div class="left-panel">
+    <!-- Плашка пользователя -->
+    <div class="user-profile-card">
+      <div class="user-profile-avatar-container">
+        <div id="userProfileAvatar" class="user-profile-avatar">
+          <span id="userProfileAvatarInitial">?</span>
+        </div>
+      </div>
+      <div class="user-profile-info">
+        <div id="userProfileNickname" class="user-profile-nickname">Загрузка...</div>
+      </div>
+      <button id="userProfileSettingsBtn" class="user-profile-settings-btn" title="Настройки профиля">⚙</button>
+    </div>
+    
+    <!-- Переключатель Комнаты/Друзья -->
+    <div class="tabs-switcher">
+      <button id="roomsTab" class="tab-btn active">Комнаты</button>
+      <button id="friendsTab" class="tab-btn">Друзья</button>
+    </div>
+
+    <!-- Контент для комнат -->
+    <div id="roomsContent" class="tab-content active">
+      <div class="rooms-list-container">
+        <div id="roomsList" class="rooms-list"></div>
+        <div id="roomsEmpty" class="rooms-empty" style="display: none;">
+          Нет комнат. Создайте новую комнату
+        </div>
+      </div>
+    </div>
+
+    <!-- Контент для друзей -->
+    <div id="friendsContent" class="tab-content">
+      <div class="friends-section">
+        <div id="friendsList" class="friends-list"></div>
+      </div>
+    </div>
+
+    <!-- Панель управления аудио и дизайном (внизу левой панели) -->
+    <div class="audio-controls-panel">
+      <button id="muteBtn" class="audio-control-btn" title="Микрофон">
+        <img src="assets/icons/micon.png" alt="Микрофон">
+      </button>
+      <button id="speakerBtn" class="audio-control-btn" title="Динамики">
+        <img src="assets/icons/soundon.png" alt="Динамики">
+      </button>
+      <button id="changeBgBtn" class="audio-control-btn" title="Сменить обои">
+        <img src="assets/icons/fon.png" alt="Фон">
+      </button>
+    </div>
+  </div>
+
+  <div class="center-panel">
+    <div class="chat-header">
+      <h2 style="margin:0; font-size:18px; color:#fff;">Чат</h2>
+      <div class="chat-header-info">
+        <div id="roomIdDisplay" class="room-id-display" style="display: none;">
+          <span class="room-id-label">ID комнаты:</span>
+          <span id="roomIdValue" class="room-id-value"></span>
+        </div>
+        <div id="usersCountDisplay" class="users-count-display" style="display: none;">
+          <span id="usersCountValue"></span>
+        </div>
+      </div>
+    </div>
+    <div id="chatMessages" class="chat-messages"></div>
+    <button id="clearChatBtn" class="clear-chat-btn" title="Очистить чат">🗑️</button>
+    <div id="attachedFilePreview" class="attached-file-preview" style="display: none;">
+      <div class="attached-file-info">
+        <span class="attached-file-name" id="attachedFileName"></span>
+        <span class="attached-file-size" id="attachedFileSize"></span>
+      </div>
+      <button class="attached-file-remove" id="removeAttachedFile" title="Удалить файл">✖</button>
+    </div>
+    <div class="chat-input-container">
+      <input type="file" id="fileInput" style="display: none;" accept="image/*,audio/*,.mp3,.wav,.ogg,video/*">
+      <div class="chat-input-wrapper">
+        <button id="attachBtn" title="Прикрепить файл"><img src="assets/icons/skrep.png" alt="Прикрепить файл"></button>
+        <input type="text" id="chatInput" placeholder="Введите сообщение..." maxlength="200">
+        <button id="emojiBtn" title="Смайлики">😊</button>
+      </div>
+      <button id="sendBtn">Отправить</button>
+      <div id="emojiPicker" class="emoji-picker">
+        <div class="emoji-grid" id="emojiGrid">
+          <!-- Эмодзи будут добавлены через JavaScript -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Панель участников (справа от чата) -->
+  <div id="usersPanel" class="users-panel" style="display: none;">
+    <div class="users-header">
+      <h2>Участники</h2>
+    </div>
+    <div id="users"></div>
+  </div>
+</div>
+</div>
+
+<!-- Модальное окно добавления друга -->
+<div id="addFriendModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Добавить в друзья</h2>
+      <button id="addFriendCloseBtn" class="modal-close-btn">✖</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-input-group">
+        <label for="friendNicknameInput">Никнейм друга</label>
+        <input type="text" id="friendNicknameInput" class="modal-input" placeholder="Введите никнейм" maxlength="15">
+        <div id="addFriendError" class="modal-error"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="addFriendSubmitBtn" class="modal-submit-btn">Добавить</button>
+      <button type="button" id="addFriendCancelBtn" class="modal-cancel-btn">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Модальное окно уведомлений -->
+<div id="notificationsModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Уведомления</h2>
+      <button id="notificationsCloseBtn" class="modal-close-btn">✖</button>
+    </div>
+    <div class="modal-body">
+      <div id="notificationsList" class="notifications-list"></div>
+      <div id="notificationsEmpty" class="notifications-empty" style="display: none; text-align: center; padding: 20px; color: rgba(255,255,255,0.6);">
+        Нет уведомлений
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Модальное окно поиска комнаты -->
+<div id="findRoomModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Найти комнату</h2>
+      <button id="findRoomCloseBtn" class="modal-close-btn">✖</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-input-group">
+        <label for="roomIdInput">ID комнаты</label>
+        <input type="text" id="roomIdInput" class="modal-input" placeholder="Введите ID комнаты" maxlength="20">
+        <div id="findRoomError" class="modal-error"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="findRoomSubmitBtn" class="modal-submit-btn">Войти</button>
+      <button id="findRoomCancelBtn" class="modal-cancel-btn">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Модальное окно создания комнаты -->
+<div id="createRoomModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Создать комнату</h2>
+      <button id="createRoomCloseBtn" class="modal-close-btn">✖</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-input-group">
+        <label for="roomNameInput">Название комнаты</label>
+        <input type="text" id="roomNameInput" class="modal-input" placeholder="Введите название комнаты" maxlength="30">
+      </div>
+      <div class="modal-input-group">
+        <label for="roomIdDisplayInput">ID комнаты</label>
+        <input type="text" id="roomIdDisplayInput" class="modal-input" readonly style="background: rgba(31,32,40,0.5); cursor: not-allowed;">
+        <small style="color: rgba(255,255,255,0.5); font-size: 12px; margin-top: 4px; display: block;">ID генерируется автоматически</small>
+      </div>
+      <div id="createRoomError" class="modal-error"></div>
+    </div>
+    <div class="modal-footer">
+      <button id="createRoomSubmitBtn" class="modal-submit-btn">Создать</button>
+      <button id="createRoomCancelBtn" class="modal-cancel-btn">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Контекстное меню для комнат -->
+<div id="roomContextMenu" class="context-menu" style="display: none;">
+  <div class="context-menu-item" id="roomContextLeave">Выйти из комнаты</div>
+  <div class="context-menu-item" id="roomContextDelete" style="display: none;">Удалить комнату</div>
+</div>
+
+<!-- Контекстное меню для участников -->
+<div id="userContextMenu" class="context-menu" style="display: none;">
+  <div class="context-menu-item" id="userContextAddFriend">Добавить в друзья</div>
+  <div class="context-menu-item" id="userContextVolume">Настройки громкости</div>
+</div>
+
+<!-- Встроенная консоль разработчика -->
+<div id="devConsole" class="dev-console" style="display: none;">
+  <div class="dev-console-header">
+    <div class="dev-console-header-left">
+      <span class="dev-console-title">📟 Консоль разработчика</span>
+      <span id="consoleLogCount" class="console-log-count">0</span>
+    </div>
+    <div class="dev-console-header-right">
+      <button id="consoleClearBtn" class="console-btn" title="Очистить консоль">🗑️</button>
+      <button id="consoleFilterAll" class="console-filter-btn active" data-level="all">Все</button>
+      <button id="consoleFilterError" class="console-filter-btn" data-level="error">Ошибки</button>
+      <button id="consoleFilterWarn" class="console-filter-btn" data-level="warn">Предупреждения</button>
+      <button id="consoleFilterInfo" class="console-filter-btn" data-level="info">Информация</button>
+      <button id="consoleFilterDebug" class="console-filter-btn" data-level="debug">Отладка</button>
+      <button id="consoleCloseBtn" class="console-btn" title="Закрыть консоль">✖</button>
+    </div>
+  </div>
+  <div id="consoleContent" class="dev-console-content">
+    <div class="console-welcome">Консоль готова к работе. Логи будут отображаться здесь.</div>
+  </div>
+</div>
+
+<!-- Модальное окно настроек профиля -->
+<div id="profileSettingsModal" class="profile-settings-modal">
+  <div class="profile-settings-content">
+    <div class="profile-settings-header">
+      <h2>Настройки профиля</h2>
+      <button id="profileSettingsCloseBtn" class="profile-settings-close-btn">✖</button>
+    </div>
+    <div class="profile-settings-body">
+      <!-- Настройка аватара -->
+      <div class="profile-settings-section">
+        <label class="profile-settings-label">Аватар</label>
+        <div class="profile-avatar-upload">
+          <div id="profileAvatarPreview" class="profile-avatar-preview">
+            <span id="profileAvatarPreviewInitial">?</span>
+          </div>
+          <div class="profile-avatar-actions">
+            <input type="file" id="profileAvatarInput" accept="image/*" style="display: none;">
+            <button id="profileAvatarUploadBtn" class="profile-avatar-upload-btn">Загрузить фото</button>
+            <button id="profileAvatarRemoveBtn" class="profile-avatar-remove-btn">Удалить</button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Отображение email (только для чтения) -->
+      <div class="profile-settings-section">
+        <label class="profile-settings-label">Email</label>
+        <div id="profileEmailDisplay" class="profile-email-display"></div>
+      </div>
+      
+      <!-- Настройка никнейма -->
+      <div class="profile-settings-section">
+        <label class="profile-settings-label" for="profileNicknameInput">Никнейм</label>
+        <input type="text" id="profileNicknameInput" class="profile-settings-input" placeholder="Ваш никнейм" maxlength="15">
+        <div id="profileNicknameError" class="profile-settings-error"></div>
+      </div>
+    </div>
+    <div class="profile-settings-footer">
+      <button id="logoutBtn" class="profile-settings-logout-btn">Выйти из аккаунта</button>
+      <div class="profile-settings-footer-row">
+        <button id="profileSettingsCancelBtn" class="profile-settings-cancel-btn">Отмена</button>
+        <button id="profileSettingsSaveBtn" class="profile-settings-save-btn">Сохранить</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="bgSelector" class="bg-selector">
+  <div class="bg-selector-header">
+    <h3>Выберите фон</h3>
+    <button class="bg-close-btn" id="bgCloseBtn">✖</button>
+  </div>
+  <div class="bg-grid" id="bgGrid">
+    <!-- Предустановленные фоны будут добавлены через JavaScript -->
+  </div>
+  <button class="bg-custom-btn" id="bgCustomBtn">Выбрать свой фон</button>
+  
+  <div class="bg-settings-section">
+    <div class="bg-setting-item">
+      <label for="blurSlider">Размытость панелей: <span id="blurValue">15</span>px</label>
+      <input type="range" id="blurSlider" min="0" max="30" value="15" step="1">
+    </div>
+  </div>
+</div>
+
+<div id="micSelector" class="device-selector">
+  <div class="device-selector-header">
+    <h3>Выберите микрофон</h3>
+    <button class="device-close-btn">✖</button>
+  </div>
+  <select id="micSelect" class="device-select"></select>
+</div>
+
+<div id="speakerSelector" class="device-selector">
+  <div class="device-selector-header">
+    <h3>Выберите динамики</h3>
+    <button class="device-close-btn">✖</button>
+  </div>
+  <select id="speakerSelect" class="device-select"></select>
+</div>
+
+<div id="confirmDialog" class="confirm-dialog">
+  <div class="confirm-dialog-content">
+    <div class="confirm-dialog-header">
+      <h3>Подтверждение</h3>
+    </div>
+    <div class="confirm-dialog-body">
+      <p id="confirmDialogMessage">Вы уверены, что хотите выполнить это действие?</p>
+    </div>
+    <div class="confirm-dialog-footer">
+      <button id="confirmDialogCancel" class="confirm-btn cancel-btn">Отмена</button>
+      <button id="confirmDialogOk" class="confirm-btn ok-btn">Подтвердить</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/simple-peer/9.11.1/simplepeer.min.js"></script>
+<!-- Firebase Configuration - загружается перед основным скриптом -->
+<script src="config/firebase.config.js"></script>
+
+<!-- 🚨 ЭКСТРЕННЫЙ ПАТЧ: Принудительная очистка кэша -->
+<script>
+  console.log('%c🚨 ЭКСТРЕННЫЙ ПАТЧ АКТИВИРОВАН', 'color: red; font-size: 20px; font-weight: bold;');
+  console.log('%c⚠️ Очистка кэша и принудительная перезагрузка', 'color: orange; font-size: 14px;');
+  
+  // Проверяем, была ли уже перезагрузка
+  const RELOAD_KEY = 'emergency_reload_v2';
+  const lastReload = sessionStorage.getItem(RELOAD_KEY);
+  const now = Date.now();
+  
+  // Если не было перезагрузки в этой сессии - перезагружаем
+  if (!lastReload || (now - parseInt(lastReload)) > 5000) {
+    console.log('%c🔄 Принудительная перезагрузка через 1 секунду...', 'color: yellow; font-size: 12px;');
+    sessionStorage.setItem(RELOAD_KEY, now.toString());
+    
+    setTimeout(() => {
+      // Очищаем кэш и перезагружаем
+      if ('caches' in window) {
+        caches.keys().then(names => {
+          names.forEach(name => caches.delete(name));
+        });
+      }
+      location.reload(true);
+    }, 1000);
+  } else {
+    console.log('%c✅ Патч применен, загружаем приложение', 'color: green; font-size: 12px;');
+  }
+</script>
+
+<!-- Модульная версия приложения -->
+<script type="module" src="src/app.js"></script>
+
+</body>
+</html>

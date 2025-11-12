@@ -1,0 +1,93 @@
+Скопируйте эти правила в Firebase Console → Realtime Database → Rules:
+
+{
+  "rules": {
+    "nicknames": {
+      ".read": true,
+      "$nickname": {
+        ".write": "auth != null && (!data.exists() || data.val() == auth.uid)",
+        ".validate": "newData.isString() && newData.val().length > 0 && newData.val() == auth.uid"
+      }
+    },
+    "users": {
+      "$userId": {
+        ".read": "auth != null",
+        ".write": "auth != null && $userId == auth.uid",
+        "nickname": {
+          ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 15"
+        },
+        "email": {
+          ".read": true,
+          ".write": "auth != null && $userId == auth.uid",
+          ".validate": "newData.isString() && newData.val().matches(/^[^@]+@[^@]+\\.[^@]+$/)"
+        },
+        "avatar": {
+          ".read": "auth != null",
+          ".write": "auth != null && $userId == auth.uid"
+        },
+        "online": {
+          ".read": "auth != null",
+          ".write": "auth != null && $userId == auth.uid"
+        },
+        "lastSeen": {
+          ".read": "auth != null",
+          ".write": "auth != null && $userId == auth.uid"
+        }
+      }
+    },
+    "rooms": {
+      ".read": "auth != null",
+      ".write": "auth != null",
+      "$roomId": {
+        ".validate": "!newData.exists() || (newData.hasChildren(['name', 'creatorId', 'createdAt']) && newData.child('name').isString() && newData.child('creatorId').isString() && newData.child('createdAt').isNumber())",
+        "users": {
+          "$pushId": {
+            ".validate": "newData.hasChildren(['nick', 'mute']) && newData.child('nick').isString() && newData.child('mute').isBoolean() && (!newData.hasChild('userId') || (newData.child('userId').isString() && newData.child('userId').val().length > 0))"
+          }
+        }
+      }
+    },
+    "friendships": {
+      "$userId": {
+        ".read": "auth != null && $userId == auth.uid",
+        "$friendId": {
+          ".write": "auth != null && (auth.uid == $userId || auth.uid == $friendId)",
+          ".validate": "newData.hasChildren(['status', 'timestamp']) && newData.child('status').val() == 'accepted' && newData.child('timestamp').isNumber()"
+        }
+      }
+    },
+    "friendRequests": {
+      "$userId": {
+        ".read": "auth != null && $userId == auth.uid",
+        "$fromUserId": {
+          ".write": "auth != null && (auth.uid == $fromUserId || $userId == auth.uid)",
+          ".read": "auth != null && ($userId == auth.uid || auth.uid == $fromUserId)",
+          ".validate": "!newData.exists() || (newData.hasChildren(['fromUserId', 'fromNickname', 'timestamp', 'status']) && newData.child('status').isString() && newData.child('status').val() == 'pending' && newData.child('fromUserId').isString() && newData.child('fromUserId').val() == $fromUserId && newData.child('fromNickname').isString() && newData.child('timestamp').isNumber())"
+        }
+      }
+    },
+    "friendMessages": {
+      "$userId": {
+        ".read": "auth != null && $userId == auth.uid",
+        "$friendId": {
+          ".read": "auth != null && ($userId == auth.uid || auth.uid == $friendId)",
+          ".write": "auth != null && (auth.uid == $userId || auth.uid == $friendId)",
+          "$messageId": {
+            ".validate": "newData.hasChildren(['fromUserId', 'fromNickname', 'message', 'timestamp', 'read']) && newData.child('fromUserId').isString() && newData.child('fromNickname').isString() && newData.child('message').isString() && newData.child('timestamp').isNumber() && newData.child('read').isBoolean()"
+          }
+        }
+      }
+    },
+    "roomInvitations": {
+      "$userId": {
+        ".read": "auth != null && $userId == auth.uid",
+        "$fromUserId": {
+          ".read": "auth != null && ($userId == auth.uid || auth.uid == $fromUserId)",
+          ".write": "auth != null && (auth.uid == $userId || auth.uid == $fromUserId)",
+          ".validate": "newData.hasChildren(['fromUserId', 'fromNickname', 'roomId', 'roomName', 'timestamp', 'status']) && newData.child('fromUserId').isString() && newData.child('fromNickname').isString() && newData.child('roomId').isString() && newData.child('roomName').isString() && newData.child('timestamp').isNumber() && newData.child('status').isString() && (newData.child('status').val() == 'pending' || newData.child('status').val() == 'accepted' || newData.child('status').val() == 'rejected')"
+        }
+      }
+    }
+  }
+}
+

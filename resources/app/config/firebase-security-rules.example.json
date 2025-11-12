@@ -1,0 +1,60 @@
+{
+  "rules": {
+    "nicknames": {
+      ".read": true,
+      "$nickname": {
+        ".write": "auth != null && (!data.exists() || data.val() == auth.uid)",
+        ".validate": "newData.isString() && newData.val().length > 0 && newData.val() == auth.uid"
+      }
+    },
+    "users": {
+      "$userId": {
+        ".read": "auth != null",
+        ".write": "auth != null && $userId == auth.uid",
+        "nickname": {
+          ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 15"
+        },
+        "email": {
+          ".read": true,
+          ".write": "auth != null && $userId == auth.uid",
+          ".validate": "newData.isString() && newData.val().matches(/^[^@]+@[^@]+\\.[^@]+$/)"
+        },
+        "avatar": {
+          ".read": "auth != null",
+          ".write": "auth != null && $userId == auth.uid"
+        },
+        "online": {
+          ".read": "auth != null",
+          ".write": "auth != null && $userId == auth.uid"
+        },
+        "lastSeen": {
+          ".read": "auth != null",
+          ".write": "auth != null && $userId == auth.uid"
+        }
+      }
+    },
+    "rooms": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "friendships": {
+      "$userId": {
+        ".read": "auth != null && $userId == auth.uid",
+        ".write": "auth != null && $userId == auth.uid",
+        "$friendId": {
+          ".validate": "newData.hasChildren(['status', 'timestamp']) && newData.child('status').val() == 'accepted'"
+        }
+      }
+    },
+    "friendRequests": {
+      "$userId": {
+        ".read": "auth != null && $userId == auth.uid",
+        ".write": "auth != null && $userId == auth.uid",
+        "$fromUserId": {
+          ".validate": "newData.hasChildren(['fromUserId', 'fromNickname', 'timestamp', 'status']) && newData.child('status').val() == 'pending'"
+        }
+      }
+    }
+  }
+}
+

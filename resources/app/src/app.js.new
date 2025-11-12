@@ -1,0 +1,1201 @@
+/**
+ * Главный файл приложения VibeChat
+ * Объединяет все модули и управляет состоянием приложения
+ * 
+ * Рефакторенная версия с использованием модульной архитектуры
+ */
+
+import { CONSTANTS } from './modules/constants.js';
+import { initFirebase, getRoomRef, createUserInRoom, updateUserMuteStatus, clearRoomMessages, getRoomsList, getRoomInfo } from './modules/firebase.js';
+import { FriendsManager } from './modules/friends.js';
+import { AuthManager } from './modules/auth.js';
+import { WebRTCManager } from './modules/webrtc.js';
+import { ChatManager } from './modules/chat.js';
+import { UIManager } from './modules/ui.js';
+import { UsersManager } from './modules/users.js';
+import { SpeechDetector } from './modules/speech.js';
+import { DevicesManager } from './modules/devices.js';
+import { ConnectionManager } from './modules/connection.js';
+import { playNotificationSound } from './modules/sounds.js';
+import { logger } from './modules/logger.js';
+import { errorHandler, ErrorCodes } from './modules/error-handler.js';
+import { AppState } from './app/app-state.js';
+import { AuthHandlers } from './app/auth-handlers.js';
+import { RoomHandlers } from './app/room-handlers.js';
+import { ProfileHandlers } from './app/profile-handlers.js';
+
+document.addEventListener("DOMContentLoaded", async () => {
+  // Инициализация логирования (неблокирующая)
+  logger.info('=== VibeChat запущен ===').catch(() => {});
+  logger.info('Версия:', { timestamp: new Date().toISOString() }).catch(() => {});
+  
+  // Настраиваем ErrorHandler для показа уведомлений
+  const ui = new UIManager();
+  errorHandler.setUIToastCallback((message) => ui.showToast(message));
+  
+  const splashScreen = document.getElementById('splashScreen');
+  const appContent = document.getElementById('appContent');
+  const authWindow = document.getElementById('authWindow');
+
+  // Убеждаемся что окно авторизации скрыто при старте
+  if (authWindow) {
+    authWindow.style.display = 'none';
+  }
+  if (appContent) {
+    appContent.style.display = 'none';
+  }
+
+  // Инициализация Firebase
+  let db, auth;
+  let authManager = null;
+  
+  try {
+    const firebaseInit = initFirebase();
+    db = firebaseInit.database;
+    auth = firebaseInit.auth;
+    authManager = new AuthManager(auth);
+    logger.info('Firebase инициализирован успешно').catch(() => {});
+  } catch (error) {
+    errorHandler.handle(error, { operation: 'initFirebase' }, { 
+      code: ErrorCodes.FIREBASE_INIT_FAILED,
+      userMessage: 'Ошибка: Конфигурация Firebase не найдена!\nПожалуйста, создайте файл config/firebase.config.js'
+    });
+    
+    // При ошибке показываем окно авторизации после splash screen
+    setTimeout(() => {
+      if (splashScreen) {
+        splashScreen.classList.add('fade-out');
+        setTimeout(() => {
+          if (splashScreen && splashScreen.parentNode) {
+            splashScreen.remove();
+          }
+          if (authWindow) {
+            authWindow.style.display = 'flex';
+          }
+        }, 1200);
+      }
+    }, 2000);
+    return;
+  }
+
+  // Инициализация состояния приложения
+  const state = new AppState();
+  state.db = db;
+  state.auth = auth;
+  state.authManager = authManager;
+
+  // Инициализация менеджеров
+  state.ui = ui;
+  state.devices = new DevicesManager();
+  state.webrtc = new WebRTCManager(null, null, null);
+  state.usersManager = new UsersManager(state.webrtc.audios, state.webrtc.userVolumes);
+  
+  // Инициализация UI
+  ui.initEmojiPicker();
+  ui.initBackgroundSettings();
+  ui.initAppearanceSettings();
+  ui.initAuthHandlers();
+  state.devices.initElements();
+  state.devices.setupCloseHandlers();
+
+  // Инициализация детектора речи
+  const speechDetector = new SpeechDetector(
+    state.webrtc.audioAnalysers,
+    state.webrtc.speakingStates,
+    state.webrtc.localAudioAnalyser,
+    state.webrtc.localStream,
+    state.myId,
+    state.muted
+  );
+  state.speechDetector = speechDetector;
+
+  speechDetector.setOnSpeakingChange((userId, isSpeaking) => {
+    if (isSpeaking) {
+      state.usersManager.markSpeaking(userId);
+    } else {
+      state.usersManager.markNotSpeaking(userId);
+    }
+  });
+
+  // Функция показа окна авторизации
+  function showAuth() {
+    logger.info('Показано окно авторизации').catch(() => {});
+    
+    if (window.electronAPI && window.electronAPI.setWindowSize) {
+      window.electronAPI.setWindowSize(500, 750, true);
+    }
+    
+    ui.showAuthWindow();
+  }
+  
+  // Функция инициализации приложения после авторизации
+  async function initApp() {
+    try {
+      // Восстанавливаем размер окна для основного приложения
+      if (window.electronAPI && window.electronAPI.restoreWindowSize) {
+        window.electronAPI.restoreWindowSize(1200, 650, 1065, 550, true);
+      }
+      
+      // Скрываем окно авторизации
+      if (authWindow) {
+        authWindow.style.display = 'none';
+        authWindow.classList.remove('show');
+      }
+      
+      // Показываем основное приложение
+      if (appContent) {
+        appContent.style.display = 'flex';
+        appContent.style.opacity = '1';
+        appContent.style.visibility = 'visible';
+        appContent.classList.add('show');
+        appContent.style.position = 'relative';
+        appContent.style.zIndex = '10';
+      }
+      
+      // Обновляем информацию о пользователе и загружаем никнейм
+      if (authManager) {
+        const currentUser = authManager.getCurrentUser();
+        if (currentUser && currentUser.email) {
+          // Загружаем никнейм из Firebase
+          try {
+            const { getUserNickname, getUserAvatar, setUserOnlineStatus } = await import('./modules/firebase.js');
+            const savedNickname = await getUserNickname(db, currentUser.uid);
+            if (savedNickname) {
+              ui.setNicknameDisplay(savedNickname);
+              ui.saveNickname(savedNickname);
+              state.myNick = savedNickname;
+            } else {
+              ui.setNicknameDisplay('Не установлен');
+              state.myNick = CONSTANTS.DEFAULT_NICKNAME;
+            }
+            
+            // Загружаем аватар пользователя
+            try {
+              const avatarUrl = await getUserAvatar(db, currentUser.uid);
+              ui.setUserAvatar(avatarUrl, savedNickname || 'Не установлен');
+            } catch (avatarError) {
+              errorHandler.handleSilent(avatarError, { operation: 'getUserAvatar' });
+              ui.setUserAvatar(null, savedNickname || 'Не установлен');
+            }
+            
+            // Обновляем email в профиле пользователя
+            try {
+              const userEmailSnapshot = await db.ref(`users/${currentUser.uid}/email`).once('value');
+              if (!userEmailSnapshot.exists() && currentUser.email) {
+                await db.ref(`users/${currentUser.uid}/email`).set(currentUser.email);
+              }
+            } catch (emailError) {
+              errorHandler.handleSilent(emailError, { operation: 'updateEmail' });
+            }
+          } catch (error) {
+            errorHandler.handle(error, { operation: 'loadUserProfile' });
+            ui.setNicknameDisplay('Ошибка загрузки');
+            ui.setUserAvatar(null, 'Не установлен');
+            state.myNick = CONSTANTS.DEFAULT_NICKNAME;
+          }
+          
+          logger.info('Пользователь вошел в приложение', { email: currentUser.email }).catch(() => {});
+          
+          // Инициализируем чат с userId и db
+          if (!state.chat) {
+            state.chat = new ChatManager(null, state.myNick, currentUser.uid, db);
+            state.chat.initElements(
+              ui.elements.chatMessages,
+              ui.elements.chatInput,
+              ui.elements.fileInput
+            );
+            state.chat.showEmptyState();
+          } else {
+            state.chat.myUserId = currentUser.uid;
+            state.chat.db = db;
+          }
+          
+          // Инициализируем менеджер друзей
+          if (!state.friendsManager) {
+            state.friendsManager = new FriendsManager(db, authManager, () => {
+              playNotificationSound('join');
+            });
+            state.friendsManager.initElements(
+              ui.elements.friendsList,
+              ui.elements.notificationsList,
+              ui.elements.notificationsBadge
+            );
+            
+            state.friendsManager.loadFriends();
+            state.friendsManager.loadNotifications();
+            state.friendsManager.startListeningToRequests();
+            state.friendsManager.startListeningToFriends();
+          }
+          
+          // Устанавливаем онлайн статус
+          const { setUserOnlineStatus } = await import('./modules/firebase.js');
+          await setUserOnlineStatus(db, currentUser.uid, true);
+        } else {
+          logger.warn('Пользователь не найден при инициализации приложения').catch(() => {});
+        }
+      }
+      
+          // Инициализируем обработчики авторизации (уже инициализированы выше)
+      
+      // Инициализируем обработчики комнат
+      const roomHandlers = new RoomHandlers(
+        state,
+        ui,
+        authManager,
+        db,
+        state.devices,
+        state.webrtc,
+        state.chat,
+        state.usersManager,
+        state.connectionManager,
+        speechDetector
+      );
+      
+      // Настраиваем callback для setupListeners
+      roomHandlers.setSetupListenersCallback(() => {
+        setupListeners();
+      });
+      
+      // Настраиваем callback для loadRoomsList
+      roomHandlers.setLoadRoomsListCallback(() => {
+        return loadRoomsList();
+      });
+      
+      // Сохраняем roomHandlers в state для доступа из других мест
+      state.roomHandlers = roomHandlers;
+      
+      // Инициализируем обработчики профиля
+      const profileHandlers = new ProfileHandlers(state, ui, authManager, db);
+      profileHandlers.init();
+      state.profileHandlers = profileHandlers;
+      
+      // Настраиваем обработчики UI для комнат
+      setupRoomUIHandlers(roomHandlers);
+      
+      // Настраиваем обработчики друзей
+      setupFriendsHandlers();
+      
+      // Настраиваем другие UI обработчики
+      setupOtherUIHandlers();
+      
+      // Обновляем connectionManager в roomHandlers после его создания
+      if (state.roomHandlers && state.connectionManager) {
+        state.roomHandlers.connectionManager = state.connectionManager;
+      }
+      
+      // Загружаем список комнат
+      setTimeout(async () => {
+        try {
+          const currentUser = authManager?.getCurrentUser();
+          if (!currentUser) {
+            return;
+          }
+          
+          await loadRoomsList();
+          startRoomsListener();
+        } catch (error) {
+          errorHandler.handle(error, { operation: 'loadRoomsListOnInit' });
+        }
+      }, 500);
+      
+    } catch (error) {
+      errorHandler.handle(error, { operation: 'initApp' });
+    }
+  }
+
+  // Инициализация мониторинга подключения (создаем до initApp)
+  state.connectionManager = new ConnectionManager(
+    db,
+    (status) => {
+      if (state.intentionalLeave) {
+        return;
+      }
+      
+      if (!state.roomRef || !state.joined) {
+        ui.updateConnectionStatus(status);
+        return;
+      }
+      
+      ui.updateConnectionStatus(status);
+      
+      if (status === 'disconnected' && state.joined && !state.intentionalLeave && state.roomRef) {
+        ui.showToast("Потеряно подключение к серверу", CONSTANTS.TOAST_DURATION * 2);
+      }
+    },
+    null
+  );
+  state.connectionManager.init();
+  
+  // Устанавливаем начальный статус подключения
+  db.ref('.info/connected').once('value', (snap) => {
+    const isConnected = snap.val() === true;
+    ui.updateConnectionStatus(isConnected ? 'connected' : 'disconnected');
+  });
+
+  // Инициализация обработчиков авторизации
+  const authHandlers = new AuthHandlers(state, ui, authManager, db, auth, initApp);
+  authHandlers.init();
+  
+  // Настраиваем обработчик выхода из аккаунта
+  authHandlers.setupLogoutHandler(
+    () => {
+      // Callback будет установлен после инициализации roomHandlers
+      if (state.roomHandlers) {
+        return state.roomHandlers.leaveRoom();
+      }
+      return Promise.resolve();
+    },
+    showAuth
+  );
+
+  // Функция скрытия splash screen и показа нужного окна
+  let splashProcessed = false;
+  function hideSplashAndShow(isAuthorized) {
+    if (splashProcessed) return;
+    splashProcessed = true;
+
+    if (splashScreen && !splashScreen.classList.contains('fade-out')) {
+      splashScreen.classList.add('fade-out');
+      
+      setTimeout(() => {
+        if (splashScreen && splashScreen.parentNode) {
+          splashScreen.remove();
+        }
+        
+        if (isAuthorized) {
+          initApp();
+        } else {
+          showAuth();
+        }
+      }, 1200);
+    } else {
+      if (isAuthorized) {
+        initApp();
+      } else {
+        showAuth();
+      }
+    }
+  }
+
+  // Проверка авторизации при загрузке
+  if (authManager) {
+    const minSplashTime = 2000;
+    const splashStartTime = Date.now();
+    let authStateResolved = false;
+    
+    authManager.onAuthStateChanged((user) => {
+      if (authStateResolved) {
+        return;
+      }
+      authStateResolved = true;
+      
+      const isAuthorized = user !== null && user !== undefined;
+      
+      logger.info('Проверка авторизации', {
+        isAuthorized,
+        email: user ? user.email : null,
+        uid: user ? user.uid : null
+      }).catch(() => {});
+      
+      const elapsed = Date.now() - splashStartTime;
+      const remainingTime = Math.max(0, minSplashTime - elapsed);
+      
+      setTimeout(() => {
+        if (isAuthorized) {
+          logger.info('Показываем основное приложение', { email: user.email }).catch(() => {});
+          hideSplashAndShow(true);
+        } else {
+          logger.info('Показываем окно авторизации').catch(() => {});
+          hideSplashAndShow(false);
+        }
+      }, remainingTime);
+    });
+  } else {
+    setTimeout(() => {
+      hideSplashAndShow(false);
+    }, 2000);
+  }
+
+  // Инициализация элементов чата
+  usersManager.initElement(ui.elements.usersEl);
+
+  // Обновление детектора речи при изменении состояния
+  const updateSpeechDetector = () => {
+    speechDetector.setMuted(state.muted);
+    speechDetector.updateLocalAnalyser(state.webrtc.localAudioAnalyser, state.webrtc.localStream);
+  };
+
+  // Обработчики событий UI
+  
+  // Переключение микрофона
+  const toggleMute = () => {
+    state.muted = !state.muted;
+    state.webrtc.toggleMute(state.muted);
+    ui.updateMuteButton(state.muted);
+    updateUserMuteStatus(state.myUserRef, state.muted);
+    updateSpeechDetector();
+  };
+
+  if (ui.elements.muteBtn) {
+    ui.elements.muteBtn.addEventListener("click", toggleMute);
+    ui.elements.muteBtn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      state.devices.showMicSelector();
+    });
+  }
+
+  // Переключение динамиков
+  const toggleSpeaker = () => {
+    const speakerMuted = state.webrtc.toggleSpeaker();
+    ui.updateSpeakerButton(speakerMuted);
+  };
+
+  if (ui.elements.speakerBtn) {
+    ui.elements.speakerBtn.addEventListener("click", toggleSpeaker);
+    ui.elements.speakerBtn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      state.devices.showSpeakerSelector();
+    });
+  }
+
+  // Выбор динамиков
+  if (state.devices.speakerSelect) {
+    state.devices.speakerSelect.addEventListener('change', () => {
+      state.webrtc.applySpeakerSelection(state.devices.speakerSelect.value);
+    });
+    state.webrtc.setSpeakerSelect(state.devices.speakerSelect);
+  }
+
+  // Выбор микрофона
+  if (state.devices.micSelect) {
+    state.devices.micSelect.addEventListener('change', async () => {
+      if (state.joined) {
+        const deviceId = state.devices.getSelectedMicId();
+        await state.webrtc.updateMicrophone(deviceId);
+        updateSpeechDetector();
+      }
+    });
+  }
+
+  // Прикрепление файла
+  if (ui.elements.attachBtn) {
+    ui.elements.attachBtn.addEventListener("click", () => {
+      ui.elements.fileInput.click();
+    });
+  }
+
+  if (ui.elements.fileInput) {
+    ui.elements.fileInput.addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (file && state.chat) {
+        state.chat.attachFile(file, (msg) => ui.showToast(msg));
+      }
+    });
+  }
+
+  // Отправка сообщения
+  if (ui.elements.sendBtn) {
+    ui.elements.sendBtn.addEventListener("click", () => {
+      if (state.chat) {
+        state.chat.sendMessage(ui.showToast.bind(ui));
+      }
+    });
+  }
+
+  if (ui.elements.chatInput) {
+    ui.elements.chatInput.addEventListener("keypress", (e) => {
+      if (e.key === "Enter" && state.chat) {
+        state.chat.sendMessage(ui.showToast.bind(ui));
+      }
+    });
+  }
+
+  // Эмодзи пикер
+  if (ui.elements.emojiBtn) {
+    ui.elements.emojiBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.elements.emojiPicker.classList.toggle("show");
+    });
+  }
+
+  document.addEventListener("click", (e) => {
+    if (ui.elements.emojiPicker && !ui.elements.emojiPicker.contains(e.target) && e.target !== ui.elements.emojiBtn) {
+      ui.elements.emojiPicker.classList.remove("show");
+    }
+  });
+
+  // Очистка чата
+  if (ui.elements.clearChatBtn) {
+    ui.elements.clearChatBtn.addEventListener("click", async () => {
+      if (!state.chat) {
+        ui.showToast("Чат не инициализирован");
+        return;
+      }
+      
+      if (state.joined && state.roomRef) {
+        const confirmed = await ui.showConfirm("Вы уверены, что хотите очистить все сообщения в чате?");
+        if (confirmed) {
+          state.chat.clear();
+          clearRoomMessages(state.roomRef);
+          ui.showToast("Чат очищен");
+        }
+      } else {
+        state.chat.clear();
+        ui.showToast("Чат очищен");
+      }
+    });
+  }
+
+  // Настройка обработчиков UI для комнат
+  function setupRoomUIHandlers(roomHandlers) {
+    // Кнопка создания комнаты
+    if (ui.elements.createRoomBtn) {
+      ui.elements.createRoomBtn.addEventListener("click", () => {
+        roomHandlers.showCreateRoomModal();
+      });
+    }
+
+    // Обработчики модального окна создания комнаты
+    if (ui.elements.createRoomCloseBtn) {
+      ui.elements.createRoomCloseBtn.addEventListener('click', () => {
+        if (ui.elements.createRoomModal) {
+          ui.elements.createRoomModal.classList.remove('show');
+        }
+      });
+    }
+
+    if (ui.elements.createRoomCancelBtn) {
+      ui.elements.createRoomCancelBtn.addEventListener('click', () => {
+        if (ui.elements.createRoomModal) {
+          ui.elements.createRoomModal.classList.remove('show');
+        }
+      });
+    }
+
+    // Создание комнаты
+    if (ui.elements.createRoomSubmitBtn && ui.elements.roomNameInput && ui.elements.roomIdDisplayInput) {
+      ui.elements.createRoomSubmitBtn.addEventListener('click', async () => {
+        const roomId = ui.elements.roomIdDisplayInput.value.trim();
+        const roomName = ui.elements.roomNameInput.value.trim();
+        
+        if (!roomName) {
+          if (ui.elements.createRoomError) {
+            ui.elements.createRoomError.textContent = 'Введите название комнаты';
+            ui.elements.createRoomError.style.display = 'block';
+          }
+          return;
+        }
+
+        await roomHandlers.createRoomWithName(roomId, roomName);
+      });
+    }
+
+    // Поддержка Enter для создания комнаты
+    if (ui.elements.roomNameInput) {
+      ui.elements.roomNameInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && ui.elements.createRoomSubmitBtn) {
+          ui.elements.createRoomSubmitBtn.click();
+        }
+      });
+    }
+
+    // Закрытие модального окна создания комнаты при клике вне его
+    if (ui.elements.createRoomModal) {
+      ui.elements.createRoomModal.addEventListener('click', (e) => {
+        if (e.target === ui.elements.createRoomModal) {
+          ui.elements.createRoomModal.classList.remove('show');
+        }
+      });
+    }
+
+    // Кнопка поиска комнаты
+    if (ui.elements.findRoomBtn) {
+      ui.elements.findRoomBtn.addEventListener("click", () => {
+        if (ui.elements.findRoomModal) {
+          ui.elements.findRoomModal.classList.add('show');
+          if (ui.elements.roomIdInput) {
+            ui.elements.roomIdInput.value = '';
+            ui.elements.roomIdInput.focus();
+          }
+          if (ui.elements.findRoomError) {
+            ui.elements.findRoomError.textContent = '';
+            ui.elements.findRoomError.style.display = 'none';
+          }
+        }
+      });
+    }
+
+    // Закрытие модального окна поиска комнаты
+    if (ui.elements.findRoomCloseBtn) {
+      ui.elements.findRoomCloseBtn.addEventListener('click', () => {
+        if (ui.elements.findRoomModal) {
+          ui.elements.findRoomModal.classList.remove('show');
+        }
+      });
+    }
+
+    if (ui.elements.findRoomCancelBtn) {
+      ui.elements.findRoomCancelBtn.addEventListener('click', () => {
+        if (ui.elements.findRoomModal) {
+          ui.elements.findRoomModal.classList.remove('show');
+        }
+      });
+    }
+
+    // Поиск и вход в комнату
+    if (ui.elements.findRoomSubmitBtn && ui.elements.roomIdInput) {
+      ui.elements.findRoomSubmitBtn.addEventListener('click', async () => {
+        const roomId = ui.elements.roomIdInput.value.trim();
+        
+        if (!roomId) {
+          if (ui.elements.findRoomError) {
+            ui.elements.findRoomError.textContent = 'Введите ID комнаты';
+            ui.elements.findRoomError.style.display = 'block';
+          }
+          return;
+        }
+
+        try {
+          if (ui.elements.findRoomModal) {
+            ui.elements.findRoomModal.classList.remove('show');
+          }
+
+          await roomHandlers.findAndJoinRoom(roomId);
+        } catch (error) {
+          errorHandler.handle(error, { operation: 'findRoom' });
+          if (ui.elements.findRoomError) {
+            ui.elements.findRoomError.textContent = 'Ошибка при подключении к комнате';
+            ui.elements.findRoomError.style.display = 'block';
+          }
+        }
+      });
+    }
+
+    // Поддержка Enter для поиска комнаты
+    if (ui.elements.roomIdInput) {
+      ui.elements.roomIdInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && ui.elements.findRoomSubmitBtn) {
+          ui.elements.findRoomSubmitBtn.click();
+        }
+      });
+    }
+
+    // Закрытие модального окна поиска комнаты при клике вне его
+    if (ui.elements.findRoomModal) {
+      ui.elements.findRoomModal.addEventListener('click', (e) => {
+        if (e.target === ui.elements.findRoomModal) {
+          ui.elements.findRoomModal.classList.remove('show');
+        }
+      });
+    }
+  }
+
+  // Функция настройки слушателей Firebase
+  function setupListeners() {
+    if (!state.roomRef) return;
+
+    // Отключаем старые слушатели перед созданием новых
+    state.roomRef.child("users").off();
+    state.roomRef.child("signals").off();
+    state.roomRef.child("messages").off();
+
+    // Слушатель пользователей
+    state.roomRef.child("users").on("value", snap => {
+      const users = snap.val() || {};
+      const currentUsersCount = Object.keys(users).length;
+
+      if (state.joined) {
+        ui.updateUsersCount(currentUsersCount);
+      }
+
+      if (state.joined && state.previousUsersCount > 0 && state.previousUsersCount !== currentUsersCount) {
+        const isMeInRoom = state.myId && users[state.myId];
+        if (isMeInRoom) {
+          if (currentUsersCount > state.previousUsersCount) {
+            playNotificationSound('join');
+          } else if (currentUsersCount < state.previousUsersCount) {
+            playNotificationSound('leave');
+          }
+        }
+        state.previousUsersCount = currentUsersCount;
+      }
+
+      speechDetector.updateUserMutedStates(users);
+
+      state.usersManager.updateUsersList(users, (userId, volume) => {
+        state.webrtc.setUserVolume(userId, volume);
+      });
+
+      if (state.joined) {
+        const count = Object.keys(users).length;
+        ui.updateUsersCount(count);
+        state.previousUsersCount = count;
+
+        if (count === 0 && state.roomRef) {
+          if (state.chat) {
+            state.chat.clear();
+          }
+          state.usersManager.clear();
+        }
+      }
+
+      // Проверка на удаление пользователя администратором
+      if (state.joined && state.myUserRef && state.myId && !users[state.myId] && !state.intentionalLeave) {
+        state.intentionalLeave = true;
+        if (state.roomHandlers) {
+          state.roomHandlers.forceLeaveRoom(true, "Вы были выкинуты администратором!").catch(error => {
+            errorHandler.handle(error, { operation: 'forceLeaveAfterRemoval' });
+          });
+        }
+      }
+    });
+
+    // Слушатель сигналов WebRTC
+    state.roomRef.child("signals").on("child_added", snap => {
+      const data = snap.val();
+      if (!data || data.to !== state.myId) return;
+      state.webrtc.handleSignal(data);
+      snap.ref.remove().catch(() => {});
+    });
+
+    // Слушатель сообщений
+    state.roomRef.child("messages").on("child_added", snap => {
+      const message = snap.val();
+      if (message && state.chat) {
+        state.chat.displayMessage(message).catch(error => {
+          errorHandler.handleSilent(error, { operation: 'displayMessage' });
+        });
+      }
+    });
+  }
+
+  // Функция загрузки списка комнат
+  async function loadRoomsList(force = false) {
+    try {
+      if (!db) {
+        throw new Error('База данных не инициализирована');
+      }
+      
+      const currentUser = authManager?.getCurrentUser();
+      if (!currentUser) {
+        throw new Error('Пользователь не авторизован');
+      }
+      
+      const snapshot = await db.ref("rooms").once('value');
+      const rooms = snapshot.val() || {};
+      
+      renderRoomsList(rooms);
+    } catch (error) {
+      errorHandler.handle(error, { operation: 'loadRoomsList' });
+    }
+  }
+
+  // Функция рендеринга списка комнат
+  function renderRoomsList(rooms) {
+    if (!ui.elements.roomsList) {
+      ui.initElements();
+    }
+    
+    const roomsListEl = ui.elements?.roomsList || document.getElementById('roomsList');
+    const roomsEmptyEl = ui.elements?.roomsEmpty || document.getElementById('roomsEmpty');
+    
+    if (!roomsListEl) return;
+    
+    roomsListEl.innerHTML = '';
+    
+    const roomsArray = Object.entries(rooms || {});
+    
+    if (roomsArray.length === 0) {
+      if (roomsEmptyEl) {
+        roomsEmptyEl.style.display = 'block';
+      }
+      return;
+    }
+    
+    if (roomsEmptyEl) {
+      roomsEmptyEl.style.display = 'none';
+    }
+    
+    roomsArray.forEach(([roomId, roomData]) => {
+      const roomElement = createRoomElement(roomId, roomData);
+      roomsListEl.appendChild(roomElement);
+    });
+  }
+
+  // Функция создания элемента комнаты
+  function createRoomElement(roomId, roomData) {
+    const roomDiv = document.createElement('div');
+    roomDiv.className = 'room-item';
+    roomDiv.dataset.roomId = roomId;
+    
+    const usersCount = roomData?.users ? Object.keys(roomData.users).length : 0;
+    const roomName = roomData?.name || 'Без названия';
+    const isCurrentRoom = state.currentRoomId === roomId && state.joined;
+    
+    roomDiv.innerHTML = `
+      <div class="room-name">${escapeHtml(roomName)}</div>
+      <div class="room-info">
+        <span class="room-users-count">👥 ${usersCount}</span>
+        ${isCurrentRoom ? '<span class="room-current">Вы здесь</span>' : ''}
+      </div>
+    `;
+    
+    roomDiv.addEventListener('click', () => {
+      if (!isCurrentRoom && !state.joined) {
+        if (state.roomHandlers) {
+          state.roomHandlers.findAndJoinRoom(roomId);
+        }
+      }
+    });
+    
+    roomDiv.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showRoomContextMenu(e, roomId, roomData?.creatorId);
+    });
+    
+    return roomDiv;
+  }
+
+  // Функция показа контекстного меню комнаты
+  function showRoomContextMenu(e, roomId, creatorId) {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (!ui.elements.roomContextMenu) return;
+    
+    const currentUser = authManager?.getCurrentUser();
+    const isCreator = currentUser && creatorId === currentUser.uid;
+    
+    if (ui.elements.roomContextDelete) {
+      ui.elements.roomContextDelete.style.display = isCreator ? 'block' : 'none';
+    }
+    
+    ui.elements.roomContextMenu.style.display = 'block';
+    ui.elements.roomContextMenu.style.left = e.pageX + 'px';
+    ui.elements.roomContextMenu.style.top = e.pageY + 'px';
+    ui.elements.roomContextMenu.dataset.roomId = roomId;
+    
+    const closeMenu = (event) => {
+      if (ui.elements.roomContextMenu && !ui.elements.roomContextMenu.contains(event.target)) {
+        ui.elements.roomContextMenu.style.display = 'none';
+        document.removeEventListener('click', closeMenu);
+      }
+    };
+    setTimeout(() => {
+      document.addEventListener('click', closeMenu);
+    }, 0);
+  }
+
+  // Функция экранирования HTML
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // Подключение к слушателю комнат в реальном времени
+  function startRoomsListener() {
+    if (!db) {
+      return;
+    }
+    
+    if (state.roomsListener) {
+      state.roomsListener.off();
+    }
+
+    state.roomsListener = db.ref("rooms").on("value", (snap) => {
+      const rooms = snap.val() || {};
+      renderRoomsList(rooms);
+    }, (error) => {
+      errorHandler.handleSilent(error, { operation: 'roomsListener' });
+    });
+  }
+
+  function stopRoomsListener() {
+    if (state.roomsListener) {
+      state.roomsListener.off();
+      state.roomsListener = null;
+    }
+  }
+
+  // Обработчики контекстного меню
+  if (ui.elements.roomContextLeave) {
+    ui.elements.roomContextLeave.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      
+      const roomId = ui.elements.roomContextMenu?.dataset.roomId;
+      
+      if (state.joined && state.currentRoomId && state.currentRoomId === roomId) {
+        if (state.roomHandlers) {
+          await state.roomHandlers.leaveRoom();
+        }
+      } else {
+        ui.showToast('Вы не находитесь в этой комнате');
+      }
+      
+      if (ui.elements.roomContextMenu) {
+        ui.elements.roomContextMenu.style.display = 'none';
+      }
+    });
+  }
+
+  if (ui.elements.roomContextDelete) {
+    ui.elements.roomContextDelete.addEventListener('click', async () => {
+      const roomId = ui.elements.roomContextMenu?.dataset.roomId;
+      if (!roomId) return;
+
+      if (state.roomHandlers) {
+        await state.roomHandlers.deleteRoom(roomId);
+        await loadRoomsList();
+      }
+      
+      if (ui.elements.roomContextMenu) {
+        ui.elements.roomContextMenu.style.display = 'none';
+      }
+    });
+  }
+
+  // ConnectionManager уже создан выше, перед initApp
+
+  // Запуск детектора речи
+  speechDetector.startDetection();
+
+  // Настройка обработчиков друзей
+  function setupFriendsHandlers() {
+    // Кнопка добавления друга в title bar
+    if (ui.elements.addFriendBtnTitle) {
+      ui.elements.addFriendBtnTitle.addEventListener('click', () => {
+        if (ui.elements.addFriendModal) {
+          ui.elements.addFriendModal.classList.add('show');
+          if (ui.elements.friendNicknameInput) {
+            ui.elements.friendNicknameInput.value = '';
+            ui.elements.friendNicknameInput.focus();
+          }
+          if (ui.elements.addFriendError) {
+            ui.elements.addFriendError.textContent = '';
+            ui.elements.addFriendError.style.display = 'none';
+          }
+        }
+      });
+    }
+
+    // Закрытие модального окна добавления друга
+    if (ui.elements.addFriendCloseBtn) {
+      ui.elements.addFriendCloseBtn.addEventListener('click', () => {
+        if (ui.elements.addFriendModal) {
+          ui.elements.addFriendModal.classList.remove('show');
+        }
+      });
+    }
+
+    if (ui.elements.addFriendCancelBtn) {
+      ui.elements.addFriendCancelBtn.addEventListener('click', () => {
+        if (ui.elements.addFriendModal) {
+          ui.elements.addFriendModal.classList.remove('show');
+        }
+      });
+    }
+
+    // Отправка запроса в друзья
+    if (ui.elements.addFriendSubmitBtn && ui.elements.friendNicknameInput) {
+      ui.elements.addFriendSubmitBtn.addEventListener('click', async () => {
+        const nickname = ui.elements.friendNicknameInput.value.trim();
+        
+        if (!nickname) {
+          if (ui.elements.addFriendError) {
+            ui.elements.addFriendError.textContent = 'Введите никнейм';
+            ui.elements.addFriendError.style.display = 'block';
+          }
+          return;
+        }
+
+        if (!state.friendsManager) {
+          if (ui.elements.addFriendError) {
+            ui.elements.addFriendError.textContent = 'Менеджер друзей не инициализирован';
+            ui.elements.addFriendError.style.display = 'block';
+          }
+          return;
+        }
+
+        try {
+          const result = await state.friendsManager.sendFriendRequestByNickname(nickname);
+          if (result.success) {
+            ui.showToast('Запрос в друзья отправлен');
+            if (ui.elements.addFriendModal) {
+              ui.elements.addFriendModal.classList.remove('show');
+            }
+            if (ui.elements.friendNicknameInput) {
+              ui.elements.friendNicknameInput.value = '';
+            }
+          } else {
+            errorHandler.handle(
+              result.error || 'Ошибка при отправке запроса',
+              { operation: 'sendFriendRequest', nickname },
+              { userMessage: result.error || 'Ошибка при отправке запроса' }
+            );
+            if (ui.elements.addFriendError) {
+              ui.elements.addFriendError.textContent = result.error || 'Ошибка при отправке запроса';
+              ui.elements.addFriendError.style.display = 'block';
+            }
+          }
+        } catch (error) {
+          errorHandler.handle(error, { operation: 'sendFriendRequest' });
+          if (ui.elements.addFriendError) {
+            ui.elements.addFriendError.textContent = 'Ошибка при отправке запроса';
+            ui.elements.addFriendError.style.display = 'block';
+          }
+        }
+      });
+    }
+
+    // Кнопка уведомлений
+    if (ui.elements.notificationsBtn) {
+      ui.elements.notificationsBtn.addEventListener('click', async () => {
+        if (ui.elements.notificationsModal) {
+          ui.elements.notificationsModal.classList.add('show');
+          if (state.friendsManager) {
+            await state.friendsManager.loadNotifications();
+          }
+        }
+      });
+    }
+
+    // Закрытие модального окна уведомлений
+    if (ui.elements.notificationsCloseBtn) {
+      ui.elements.notificationsCloseBtn.addEventListener('click', () => {
+        if (ui.elements.notificationsModal) {
+          ui.elements.notificationsModal.classList.remove('show');
+        }
+      });
+    }
+
+    // Закрытие модальных окон при клике вне их
+    if (ui.elements.addFriendModal) {
+      ui.elements.addFriendModal.addEventListener('click', (e) => {
+        if (e.target === ui.elements.addFriendModal) {
+          ui.elements.addFriendModal.classList.remove('show');
+        }
+      });
+    }
+
+    if (ui.elements.notificationsModal) {
+      ui.elements.notificationsModal.addEventListener('click', (e) => {
+        if (e.target === ui.elements.notificationsModal) {
+          ui.elements.notificationsModal.classList.remove('show');
+        }
+      });
+    }
+
+    // Поддержка Enter для отправки запроса в друзья
+    if (ui.elements.friendNicknameInput) {
+      ui.elements.friendNicknameInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && ui.elements.addFriendSubmitBtn) {
+          ui.elements.addFriendSubmitBtn.click();
+        }
+      });
+    }
+  }
+
+  // Настройка других UI обработчиков
+  function setupOtherUIHandlers() {
+    // Переключение между вкладками Комнаты/Друзья
+    if (ui.elements.roomsTab && ui.elements.friendsTab) {
+      ui.elements.roomsTab.addEventListener('click', async () => {
+        const roomsListEl = ui.elements?.roomsList || document.getElementById('roomsList');
+        if (roomsListEl && roomsListEl.children.length === 0) {
+          try {
+            await loadRoomsList(true);
+          } catch (error) {
+            errorHandler.handleSilent(error, { operation: 'loadRoomsOnTabSwitch' });
+          }
+        }
+        
+        ui.elements.roomsTab.classList.add('active');
+        ui.elements.friendsTab.classList.remove('active');
+        ui.elements.roomsContent.classList.add('active');
+        ui.elements.friendsContent.classList.remove('active');
+      });
+
+      ui.elements.friendsTab.addEventListener('click', () => {
+        ui.elements.friendsTab.classList.add('active');
+        ui.elements.roomsTab.classList.remove('active');
+        ui.elements.friendsContent.classList.add('active');
+        ui.elements.roomsContent.classList.remove('active');
+      });
+    }
+
+    // Фон
+    if (ui.elements.changeBgBtn) {
+      ui.elements.changeBgBtn.addEventListener("click", () => {
+        ui.elements.bgSelector.classList.add("show");
+      });
+    }
+
+    if (ui.elements.bgCloseBtn) {
+      ui.elements.bgCloseBtn.addEventListener("click", () => {
+        ui.elements.bgSelector.classList.remove("show");
+      });
+    }
+
+    if (ui.elements.bgSelector) {
+      ui.elements.bgSelector.addEventListener("click", (e) => {
+        if (e.target === ui.elements.bgSelector) {
+          ui.elements.bgSelector.classList.remove("show");
+        }
+      });
+    }
+
+    if (ui.elements.bgCustomBtn) {
+      ui.elements.bgCustomBtn.addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.onchange = e => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            ui.setBackground(reader.result);
+            document.querySelectorAll(".bg-option").forEach(opt => opt.classList.remove("selected"));
+            ui.elements.bgSelector.classList.remove("show");
+          };
+          reader.readAsDataURL(file);
+        };
+        input.click();
+      });
+    }
+
+    // Закрытие окна
+    if (ui.elements.closeBtn) {
+      ui.elements.closeBtn.addEventListener("click", () => {
+        if (window.electronAPI && window.electronAPI.closeWindow) {
+          window.electronAPI.closeWindow();
+        } else {
+          window.close();
+        }
+      });
+    }
+
+    // Сворачивание окна
+    const minimizeBtn = document.getElementById("minimizeBtn");
+    if (minimizeBtn) {
+      minimizeBtn.addEventListener("click", () => {
+        if (window.electronAPI && window.electronAPI.minimizeWindow) {
+          window.electronAPI.minimizeWindow();
+        }
+      });
+    }
+  }
+
+  // Логируем информацию о файле логов
+  if (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.getLogFilePath) {
+    window.electronAPI.getLogFilePath().then(logPath => {
+      logger.info('Файл логов создан', { path: logPath }).catch(() => {});
+    }).catch(error => {
+      errorHandler.handleSilent(error, { operation: 'getLogFilePath' });
+    });
+  }
+});
+

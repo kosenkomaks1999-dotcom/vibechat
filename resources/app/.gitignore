@@ -1,0 +1,10 @@
+# Старый файл app.js (если есть)
+app.js.old
+
+# Node modules
+node_modules/
+
+# Логи
+*.log
+npm-debug.log*
+
