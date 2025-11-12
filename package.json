@@ -49,6 +49,6 @@
     "rcedit": "^4.0.1"
   },
   "dependencies": {
-    "electron-updater": "^6.1.7"
+    "electron-updater": "^6.6.2"
   }
 }

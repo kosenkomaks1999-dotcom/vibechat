@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
 const { existsSync, mkdirSync } = require('fs');
+const AppUpdater = require('../../updater.js');
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -72,6 +73,8 @@ function createWindow() {
       win.center();
     }
   });
+  
+  return win;
 }
 
 // Глобальная переменная для хранения пути к папке логов
@@ -190,6 +193,8 @@ logDirPath = path.join(projectRoot, 'logs');
 console.log('Логи записываются в:', logPath);
 console.log('Логи комнат записываются в:', roomLogPath);
 
+let updater = null;
+
 app.whenReady().then(async () => {
   // КРИТИЧНО: Очищаем весь кэш приложения при запуске
   try {
@@ -203,7 +208,15 @@ app.whenReady().then(async () => {
     console.error('⚠️ Ошибка очистки кэша:', err);
   }
   
-  createWindow();
+  const win = createWindow();
+  
+  // Инициализация автообновления
+  updater = new AppUpdater(win);
+  
+  // Проверка обновлений через 3 секунды после запуска
+  setTimeout(() => {
+    updater.checkForUpdates();
+  }, 3000);
 });
 
 app.on('window-all-closed', () => {
