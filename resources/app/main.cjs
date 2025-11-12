@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
 const { existsSync, mkdirSync } = require('fs');
-const AppUpdater = require('./updater.js');
+const AppUpdater = require('./updater.cjs');
 
 function createWindow() {
   const win = new BrowserWindow({
