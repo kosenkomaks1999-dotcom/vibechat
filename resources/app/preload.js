@@ -31,5 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Получение пути к файлу логов
   getLogFilePath: () => ipcRenderer.invoke('get-log-file-path'),
+  
+  // Обработчик события закрытия приложения
+  onAppClosing: (callback) => ipcRenderer.on('app-closing', callback),
 });
 

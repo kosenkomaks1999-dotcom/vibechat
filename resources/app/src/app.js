@@ -3620,6 +3620,42 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  // Обработчик события закрытия приложения от main process
+  if (window.electronAPI && window.electronAPI.onAppClosing) {
+    window.electronAPI.onAppClosing(() => {
+      console.log('🔴 Приложение закрывается, очистка ресурсов...');
+      
+      // Закрываем все WebRTC соединения
+      if (webrtc) {
+        Object.values(webrtc.peers).forEach(peer => {
+          if (peer && !peer.destroyed) {
+            peer.destroy();
+          }
+        });
+        
+        // Останавливаем локальный стрим
+        if (webrtc.localStream) {
+          webrtc.localStream.getTracks().forEach(track => track.stop());
+        }
+      }
+      
+      // Отключаемся от Firebase
+      if (roomRef) {
+        roomRef.off();
+      }
+      
+      // Устанавливаем статус offline
+      if (authManager && authManager.isAuthenticated() && db) {
+        const currentUser = authManager.getCurrentUser();
+        if (currentUser) {
+          setUserOnlineStatus(db, currentUser.uid, false);
+        }
+      }
+      
+      console.log('✅ Ресурсы очищены');
+    });
+  }
+  
   // Обработчик закрытия окна
   // Примечание: onDisconnect() в setUserOnlineStatus уже обрабатывает автоматическую
   // установку статуса offline при отключении, но оставляем это как дополнительную меру

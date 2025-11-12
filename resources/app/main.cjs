@@ -42,7 +42,30 @@ function createWindow() {
 
   // Обработчик для закрытия окна
   ipcMain.on('close-window', () => {
-    win.close();
+    // Отправляем событие в renderer для очистки ресурсов
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('app-closing');
+      // Даем время на очистку ресурсов
+      setTimeout(() => {
+        if (win && !win.isDestroyed()) {
+          win.close();
+        }
+      }, 500);
+    }
+  });
+  
+  // Обработчик события закрытия окна
+  win.on('close', (event) => {
+    // Предотвращаем закрытие для очистки ресурсов
+    if (!win.isReadyToClose) {
+      event.preventDefault();
+      win.webContents.send('app-closing');
+      // Даем время на очистку
+      setTimeout(() => {
+        win.isReadyToClose = true;
+        win.close();
+      }, 500);
+    }
   });
 
   // Обработчик для сворачивания окна
@@ -220,7 +243,19 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Принудительно завершаем все процессы
+  console.log('🔴 Все окна закрыты, завершение приложения...');
+  app.quit();
+});
+
+app.on('before-quit', () => {
+  console.log('🔴 Приложение завершается...');
+});
+
+app.on('will-quit', () => {
+  console.log('🔴 Завершение всех процессов...');
+  // Удаляем все IPC слушатели
+  ipcMain.removeAllListeners();
 });
 
 
