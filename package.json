@@ -2,7 +2,7 @@
   "name": "vibechat",
   "version": "1.0.0",
   "description": "VibeChat - голосовой чат приложение",
-  "main": "main.js",
+  "main": "resources/app/main.cjs",
   "author": "VibeChat Team",
   "license": "MIT",
   "scripts": {
@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "electron": "^28.0.0",
-    "electron-builder": "^24.9.1",
+    "electron-builder": "^24.13.3",
     "rcedit": "^4.0.1"
   },
   "dependencies": {
