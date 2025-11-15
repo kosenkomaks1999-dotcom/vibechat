@@ -244,7 +244,7 @@ export class ChatManager {
       img.alt = escapeHtml(file.name);
       img.title = escapeHtml(file.name) + " (ПКМ для скачивания)";
       img.className = "message-image";
-      img.crossOrigin = "anonymous"; // Для загрузки с внешних доменов
+      // crossOrigin убран - Catbox/Imgur не требуют CORS для просмотра
       
       // Обработчик ошибки загрузки
       img.addEventListener('error', () => {
@@ -277,7 +277,7 @@ export class ChatManager {
       audio.controls = true;
       audio.src = fileSource;
       audio.className = "message-audio";
-      audio.crossOrigin = "anonymous";
+      // crossOrigin убран - не требуется для Catbox/Imgur
       
       // Обработчик ошибки
       audio.addEventListener('error', () => {
@@ -299,7 +299,7 @@ export class ChatManager {
       video.controls = true;
       video.src = fileSource;
       video.className = "message-video";
-      video.crossOrigin = "anonymous";
+      // crossOrigin убран - не требуется для Catbox/Imgur
       
       // Обработчик ошибки
       video.addEventListener('error', () => {
@@ -411,6 +411,24 @@ export class ChatManager {
           fileType: fileData.type,
           fileSize: (fileData.size / 1024).toFixed(2) + ' KB'
         });
+
+        // Логируем файл для администратора
+        if (this.db) {
+          try {
+            await this.db.ref('uploadedFiles').push({
+              url: fileData.url,
+              name: fileData.name,
+              type: fileData.type,
+              size: fileData.size,
+              host: fileData.host,
+              uploadedBy: this.myUserId,
+              uploadedByNickname: this.myNickname,
+              timestamp: Date.now()
+            });
+          } catch (err) {
+            console.warn('Не удалось залогировать файл:', err);
+          }
+        }
 
         await sendFirebaseMessage(this.roomRef, messageData);
         
