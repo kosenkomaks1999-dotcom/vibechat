@@ -10,27 +10,15 @@ const { dialog } = require('electron');
 autoUpdater.autoDownload = false; // Не скачивать автоматически
 autoUpdater.autoInstallOnAppQuit = true; // Установить при выходе
 
-// Настройка для приватного репозитория
-// ВАЖНО: Токен должен быть в переменной окружения GITHUB_TOKEN
-const githubToken = process.env.GITHUB_TOKEN;
+// Настройка для публичного репозитория
+// Токен НЕ нужен для публичных релизов
+autoUpdater.setFeedURL({
+  provider: 'github',
+  owner: 'kosenkomaks1999-dotcom',
+  repo: 'vibechat'
+});
 
-if (githubToken) {
-  autoUpdater.setFeedURL({
-    provider: 'github',
-    owner: 'kosenkomaks1999-dotcom',
-    repo: 'vibechat',
-    token: githubToken
-  });
-  console.log('✅ GitHub токен загружен из переменной окружения');
-} else {
-  // Для публичного репозитория токен не нужен
-  autoUpdater.setFeedURL({
-    provider: 'github',
-    owner: 'kosenkomaks1999-dotcom',
-    repo: 'vibechat'
-  });
-  console.warn('⚠️ GitHub токен не найден. Обновления будут работать только для публичного репозитория.');
-}
+console.log('✅ Автообновление настроено для публичного репозитория');
 
 class AppUpdater {
   constructor(mainWindow) {

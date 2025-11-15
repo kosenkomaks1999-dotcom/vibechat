@@ -1,0 +1,47 @@
+ИНСТРУКЦИЯ ПО СОЗДАНИЮ РЕЛИЗА v1.0.14
+
+Код и тег уже загружены на GitHub!
+
+СЛЕДУЮЩИЕ ШАГИ:
+
+1. Открой GitHub в браузере:
+   https://github.com/kosenkomaks1999-dotcom/vibechat/releases/new
+
+2. Выбери тег: v1.0.14
+
+3. Заголовок релиза:
+   VibeChat v1.0.14 - Интеграция Catbox.moe
+
+4. Описание релиза (скопируй из release-notes-1.0.14.md):
+   - Открой файл release-notes-1.0.14.md
+   - Скопируй весь текст
+   - Вставь в поле описания
+
+5. Загрузи файл установщика:
+   - Нажми "Attach binaries by dropping them here or selecting them"
+   - Выбери файл: release/VibeChat-Setup-1.0.14.exe
+   - Дождись загрузки
+
+6. Опционально загрузи blockmap:
+   - release/VibeChat-Setup-1.0.14.exe.blockmap
+   - Это ускорит дельта-обновления
+
+7. Убедись что:
+   ☑ "Set as the latest release" - отмечено
+   ☐ "Set as a pre-release" - НЕ отмечено
+
+8. Нажми "Publish release"
+
+ГОТОВО! Релиз опубликован.
+
+Автообновление начнет работать автоматически для пользователей с версией 1.0.13.
+
+ФАЙЛЫ ДЛЯ ЗАГРУЗКИ:
+- release/VibeChat-Setup-1.0.14.exe (основной установщик)
+- release/VibeChat-Setup-1.0.14.exe.blockmap (опционально)
+
+ПРОВЕРКА:
+После публикации проверь:
+1. Релиз виден на https://github.com/kosenkomaks1999-dotcom/vibechat/releases
+2. Файл VibeChat-Setup-1.0.14.exe доступен для скачивания
+3. Автообновление работает (запусти старую версию и проверь)
