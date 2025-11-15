@@ -7,7 +7,7 @@ export const CONSTANTS = {
   // Ограничения чата
   MAX_MESSAGES: 200,
   MAX_MESSAGE_LENGTH: 200,
-  MAX_FILE_SIZE: 10 * 1024 * 1024, // 10MB
+  MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB (Catbox поддерживает до 200MB, но ограничиваем для разумного использования)
   
   // Ограничения комнат
   MAX_USERS: 8,

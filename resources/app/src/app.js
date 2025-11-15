@@ -16,7 +16,8 @@ import { DevicesManager } from './modules/devices.js';
 import { ConnectionManager } from './modules/connection.js';
 import { WhiteboardManager } from './modules/whiteboard.js';
 import { playNotificationSound } from './modules/sounds.js';
-import { validateNicknameLength, validateNicknameFormat } from './utils/security.js';
+import { validateNicknameLength, validateNicknameFormat, escapeHtml } from './utils/security.js';
+import { compressImage } from './utils/image-utils.js';
 import { logger } from './modules/logger.js';
 import { devConsole } from './modules/console.js';
 import { RoomsCache } from './utils/rooms-cache.js';
@@ -383,7 +384,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                   return;
                 }
                 
-                const nickname = currentInput.value.trim();
+                const nickname = currentInput?.value?.trim() || '';
                 console.log('🔍 Никнейм:', nickname);
                 
                 if (currentError) {
@@ -942,8 +943,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Открытие модального окна настроек профиля
   if (ui.elements.userProfileSettingsBtn && authManager) {
     ui.elements.userProfileSettingsBtn.addEventListener('click', async () => {
-      const currentUser = authManager.getCurrentUser();
-      if (currentUser) {
+      try {
+        const currentUser = authManager.getCurrentUser();
+        if (!currentUser) {
+          ui.showToast('Пользователь не авторизован', 3000, 'error');
+          return;
+        }
+        
         // Загружаем текущие данные профиля
         try {
           const nickname = await getUserNickname(db, currentUser.uid);
@@ -964,9 +970,15 @@ document.addEventListener("DOMContentLoaded", async () => {
           ui.updateAvatarPreview(avatarUrl, nickname || 'Не установлен');
         } catch (error) {
           console.error('Ошибка при загрузке данных профиля:', error);
+          logger.error('Ошибка загрузки профиля', { error: error.message }).catch(() => {});
+          ui.showToast('Ошибка при загрузке данных профиля', 3000, 'error');
         }
         
         ui.showProfileSettings();
+      } catch (error) {
+        console.error('🔴 Критическая ошибка при открытии настроек профиля:', error);
+        logger.error('Ошибка открытия настроек', { error: error.message }).catch(() => {});
+        ui.showToast('Ошибка при открытии настроек', 3000, 'error');
       }
     });
   }
@@ -999,8 +1011,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     ui.elements.profileAvatarInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (file) {
+      try {
+        const file = e.target.files[0];
+        if (!file) return;
+        
         // Проверяем размер файла (максимум 7MB для аватара)
         if (file.size > 7 * 1024 * 1024) {
           ui.showProfileError('Размер файла должен быть не более 7MB');
@@ -1034,8 +1048,13 @@ document.addEventListener("DOMContentLoaded", async () => {
           console.log(`Аватар сжат: ${originalSizeKB}KB -> ${compressedSizeKB}KB`);
         } catch (error) {
           console.error('Ошибка при обработке файла:', error);
+          logger.error('Ошибка обработки аватара', { error: error.message }).catch(() => {});
           ui.showProfileError('Ошибка при обработке изображения');
         }
+      } catch (error) {
+        console.error('🔴 Критическая ошибка при загрузке аватара:', error);
+        logger.error('Критическая ошибка аватара', { error: error.message }).catch(() => {});
+        ui.showProfileError('Ошибка при загрузке файла');
       }
     });
   }
@@ -3134,17 +3153,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     
-    // ВАЖНО: Если есть комнаты, обязательно скрываем пустое состояние
+    // 🔧 FIX: Скрываем пустое состояние один раз (было дублирование)
     if (ui.elements.roomsEmpty) {
       ui.elements.roomsEmpty.style.display = 'none';
       console.log('🔵 Пустое состояние скрыто (есть комнаты для отображения)');
     }
 
     console.log('Очищаем список и отображаем', roomsArray.length, 'комнат');
-    // Скрываем пустое состояние - комнаты есть (уже скрыто выше, но на всякий случай)
-    if (ui.elements.roomsEmpty) {
-      ui.elements.roomsEmpty.style.display = 'none';
-    }
     
     // Используем DocumentFragment для оптимизации DOM операций
     const fragment = document.createDocumentFragment();
@@ -3309,12 +3324,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }, 0);
   }
 
-  // Функция для экранирования HTML
-  function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-  }
+  // escapeHtml перенесена в utils/security.js
 
   // 🚀 ОПТИМИЗИРОВАННЫЙ слушатель комнат с менеджером подписок
   function startRoomsListener() {
@@ -3916,6 +3926,37 @@ document.addEventListener("DOMContentLoaded", async () => {
     window.electronAPI.onAppClosing(() => {
       console.log('🔴 Приложение закрывается, очистка ресурсов...');
       
+      // 🔧 FIX: Очищаем все таймеры
+      if (usersUpdateTimeout) {
+        clearTimeout(usersUpdateTimeout);
+        usersUpdateTimeout = null;
+      }
+      if (roomsUpdateTimeout) {
+        clearTimeout(roomsUpdateTimeout);
+        roomsUpdateTimeout = null;
+      }
+      if (updateRoomsListTimeout) {
+        clearTimeout(updateRoomsListTimeout);
+        updateRoomsListTimeout = null;
+      }
+      if (typeof autoLoadRoomsInterval !== 'undefined' && autoLoadRoomsInterval) {
+        clearInterval(autoLoadRoomsInterval);
+        autoLoadRoomsInterval = null;
+      }
+      
+      // 🔧 FIX: Останавливаем слушатели Firebase
+      if (typeof stopRoomsListener === 'function') {
+        stopRoomsListener();
+      }
+      if (typeof listenersManager !== 'undefined' && listenersManager) {
+        listenersManager.unregisterAll();
+      }
+      
+      // 🔧 FIX: Останавливаем детекцию речи
+      if (speechDetector && typeof speechDetector.stopDetection === 'function') {
+        speechDetector.stopDetection();
+      }
+      
       // Закрываем все WebRTC соединения
       if (webrtc) {
         Object.values(webrtc.peers).forEach(peer => {
@@ -3963,6 +4004,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (updateRoomsListTimeout) {
       clearTimeout(updateRoomsListTimeout);
       updateRoomsListTimeout = null;
+    }
+    
+    // 🔧 FIX: Очищаем autoLoadRoomsInterval
+    if (typeof autoLoadRoomsInterval !== 'undefined' && autoLoadRoomsInterval) {
+      clearInterval(autoLoadRoomsInterval);
+      autoLoadRoomsInterval = null;
     }
     
     // Останавливаем детекцию речи

@@ -1,6 +1,6 @@
 {
   "name": "vibechat",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "VibeChat - голосовой чат приложение",
   "main": "resources/app/main.cjs",
   "author": "VibeChat Team",

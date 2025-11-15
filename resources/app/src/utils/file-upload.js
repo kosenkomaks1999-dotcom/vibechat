@@ -1,0 +1,158 @@
+/**
+ * Модуль для загрузки файлов на Catbox.moe
+ * Бесплатный хостинг для всех типов файлов (изображения, аудио, видео)
+ * Лимиты: до 200 MB на файл, файлы хранятся вечно
+ */
+
+import { errorHandler, ErrorCodes } from '../modules/error-handler.js';
+
+/**
+ * Загружает файл на Catbox.moe
+ * @param {File} file - Файл для загрузки
+ * @returns {Promise<Object>} Данные загруженного файла
+ */
+export async function uploadToCatbox(file) {
+  try {
+    // Проверка размера файла (200 MB максимум)
+    const MAX_SIZE = 200 * 1024 * 1024; // 200 MB
+    if (file.size > MAX_SIZE) {
+      throw new Error(`Файл слишком большой. Максимальный размер: 200 MB`);
+    }
+
+    // Создаем FormData для отправки
+    const formData = new FormData();
+    formData.append('reqtype', 'fileupload');
+    formData.append('fileToUpload', file);
+    
+    console.log('📤 Загрузка файла на Catbox:', {
+      name: file.name,
+      size: (file.size / 1024 / 1024).toFixed(2) + ' MB',
+      type: file.type
+    });
+
+    // Отправляем файл на Catbox
+    const response = await fetch('https://catbox.moe/user/api.php', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ошибка загрузки: ${response.status} ${response.statusText}`);
+    }
+
+    // Catbox возвращает просто URL в виде текста
+    const url = await response.text();
+    
+    if (!url || !url.startsWith('https://files.catbox.moe/')) {
+      throw new Error('Получен некорректный URL от Catbox');
+    }
+
+    console.log('✅ Файл успешно загружен на Catbox:', url);
+
+    return {
+      url: url.trim(),
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      host: 'catbox'
+    };
+  } catch (error) {
+    console.error('❌ Ошибка загрузки на Catbox:', error);
+    errorHandler.handleSilent(error, { 
+      operation: 'uploadToCatbox', 
+      fileName: file.name,
+      fileSize: file.size 
+    });
+    throw error;
+  }
+}
+
+/**
+ * Загружает файл с прогрессом
+ * @param {File} file - Файл для загрузки
+ * @param {Function} onProgress - Callback для отслеживания прогресса (percent) => {}
+ * @returns {Promise<Object>} Данные загруженного файла
+ */
+export async function uploadFileWithProgress(file, onProgress) {
+  try {
+    const MAX_SIZE = 200 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      throw new Error(`Файл слишком большой. Максимальный размер: 200 MB`);
+    }
+
+    const formData = new FormData();
+    formData.append('reqtype', 'fileupload');
+    formData.append('fileToUpload', file);
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+
+      // Отслеживание прогресса загрузки
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && onProgress) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          onProgress(percent);
+        }
+      });
+
+      // Обработка завершения
+      xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+          const url = xhr.responseText.trim();
+          
+          if (!url || !url.startsWith('https://files.catbox.moe/')) {
+            reject(new Error('Получен некорректный URL от Catbox'));
+            return;
+          }
+
+          console.log('✅ Файл успешно загружен на Catbox:', url);
+
+          resolve({
+            url: url,
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            host: 'catbox'
+          });
+        } else {
+          reject(new Error(`Ошибка загрузки: ${xhr.status} ${xhr.statusText}`));
+        }
+      });
+
+      // Обработка ошибок
+      xhr.addEventListener('error', () => {
+        reject(new Error('Ошибка сети при загрузке файла'));
+      });
+
+      xhr.addEventListener('abort', () => {
+        reject(new Error('Загрузка файла отменена'));
+      });
+
+      // Отправляем запрос
+      xhr.open('POST', 'https://catbox.moe/user/api.php');
+      xhr.send(formData);
+    });
+  } catch (error) {
+    console.error('❌ Ошибка загрузки на Catbox:', error);
+    errorHandler.handleSilent(error, { 
+      operation: 'uploadFileWithProgress', 
+      fileName: file.name 
+    });
+    throw error;
+  }
+}
+
+/**
+ * Основная функция для загрузки файлов
+ * Автоматически выбирает метод загрузки
+ * @param {File} file - Файл для загрузки
+ * @param {Function} onProgress - Опциональный callback для прогресса
+ * @returns {Promise<Object>} Данные загруженного файла
+ */
+export async function uploadFile(file, onProgress = null) {
+  if (onProgress) {
+    return await uploadFileWithProgress(file, onProgress);
+  } else {
+    return await uploadToCatbox(file);
+  }
+}

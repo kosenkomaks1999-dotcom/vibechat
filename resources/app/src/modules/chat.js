@@ -9,6 +9,7 @@ import { sendMessage as sendFirebaseMessage, getUserAvatar } from './firebase.js
 import { errorHandler, ErrorCodes } from './error-handler.js';
 import { validateFile as validateFileSecurity } from '../utils/file-security.js';
 import { getElementById } from '../utils/dom-cache.js';
+import { uploadFile } from '../utils/file-upload.js';
 
 /**
  * Класс для управления чатом
@@ -121,6 +122,17 @@ export class ChatManager {
   async displayMessage(message) {
     if (!this.chatMessages) return;
     
+    // Логируем полученное сообщение для отладки
+    if (message.file) {
+      console.log('📥 Получено сообщение с файлом:', {
+        author: message.author,
+        fileName: message.file.name,
+        fileUrl: message.file.url,
+        fileType: message.file.type,
+        host: message.file.host
+      });
+    }
+    
     // Удаляем placeholder пустого чата
     const emptyState = this.chatMessages.querySelector('.chat-empty-state');
     if (emptyState) {
@@ -213,25 +225,70 @@ export class ChatManager {
     const fileContainer = document.createElement("div");
     fileContainer.className = "message-file";
     
+    // Только URL от Catbox (base64 больше не поддерживается)
+    const fileSource = file.url;
+    
+    if (!fileSource) {
+      console.error('Файл без URL (старый формат base64):', file);
+      const errorDiv = document.createElement('div');
+      errorDiv.className = 'file-error';
+      errorDiv.textContent = `⚠️ Файл в старом формате: ${escapeHtml(file.name)}`;
+      errorDiv.style.cssText = 'color: #ffa94d; padding: 8px; font-size: 12px;';
+      fileContainer.appendChild(errorDiv);
+      return fileContainer;
+    }
+    
     if (file.type.startsWith('image/')) {
       const img = document.createElement("img");
-      img.src = file.data;
+      img.src = fileSource;
       img.alt = escapeHtml(file.name);
       img.title = escapeHtml(file.name) + " (ПКМ для скачивания)";
       img.className = "message-image";
+      img.crossOrigin = "anonymous"; // Для загрузки с внешних доменов
+      
+      // Обработчик ошибки загрузки
+      img.addEventListener('error', () => {
+        console.error('Ошибка загрузки изображения:', fileSource);
+        img.style.display = 'none';
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'file-error';
+        errorMsg.textContent = `❌ Не удалось загрузить изображение: ${escapeHtml(file.name)}`;
+        errorMsg.style.cssText = 'color: #ff6b6b; padding: 8px; font-size: 12px;';
+        fileContainer.appendChild(errorMsg);
+        
+        // Добавляем ссылку для прямого открытия
+        const link = document.createElement('a');
+        link.href = fileSource;
+        link.target = '_blank';
+        link.textContent = 'Открыть в браузере';
+        link.style.cssText = 'color: #4dabf7; text-decoration: underline; margin-left: 8px;';
+        errorMsg.appendChild(link);
+      });
       
       // Обработчик контекстного меню для скачивания изображения
       img.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        this.downloadImage(file.data, file.name);
+        this.downloadImage(fileSource, file.name);
       });
       
       fileContainer.appendChild(img);
     } else if (file.type.startsWith('audio/')) {
       const audio = document.createElement("audio");
       audio.controls = true;
-      audio.src = file.data;
+      audio.src = fileSource;
       audio.className = "message-audio";
+      audio.crossOrigin = "anonymous";
+      
+      // Обработчик ошибки
+      audio.addEventListener('error', () => {
+        console.error('Ошибка загрузки аудио:', fileSource);
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'file-error';
+        errorMsg.innerHTML = `❌ Не удалось загрузить аудио: ${escapeHtml(file.name)} <a href="${fileSource}" target="_blank" style="color: #4dabf7;">Открыть</a>`;
+        errorMsg.style.cssText = 'color: #ff6b6b; padding: 8px; font-size: 12px;';
+        fileContainer.appendChild(errorMsg);
+      });
+      
       fileContainer.appendChild(audio);
       const filenameSpan = document.createElement("span");
       filenameSpan.className = "message-filename";
@@ -240,8 +297,20 @@ export class ChatManager {
     } else if (file.type.startsWith('video/')) {
       const video = document.createElement("video");
       video.controls = true;
-      video.src = file.data;
+      video.src = fileSource;
       video.className = "message-video";
+      video.crossOrigin = "anonymous";
+      
+      // Обработчик ошибки
+      video.addEventListener('error', () => {
+        console.error('Ошибка загрузки видео:', fileSource);
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'file-error';
+        errorMsg.innerHTML = `❌ Не удалось загрузить видео: ${escapeHtml(file.name)} <a href="${fileSource}" target="_blank" style="color: #4dabf7;">Открыть</a>`;
+        errorMsg.style.cssText = 'color: #ff6b6b; padding: 8px; font-size: 12px;';
+        fileContainer.appendChild(errorMsg);
+      });
+      
       fileContainer.appendChild(video);
       const filenameSpan = document.createElement("span");
       filenameSpan.className = "message-filename";
@@ -250,8 +319,9 @@ export class ChatManager {
     } else {
       const sizeKB = (file.size / 1024).toFixed(2);
       const link = document.createElement("a");
-      link.href = file.data;
+      link.href = fileSource;
       link.download = escapeHtml(file.name);
+      link.target = "_blank";
       link.className = "message-file-link";
       link.textContent = `📎 ${escapeHtml(file.name)} (${sizeKB} KB)`;
       fileContainer.appendChild(link);
@@ -298,66 +368,65 @@ export class ChatManager {
 
     // Если есть прикрепленный файл
     if (this.attachedFile) {
+      // Catbox поддерживает до 200MB, но ограничиваем для разумного использования
       if (!validateFileSize(this.attachedFile.size, CONSTANTS.MAX_FILE_SIZE)) {
-        showToast("Файл слишком большой (макс 10MB)");
+        const maxSizeMB = Math.round(CONSTANTS.MAX_FILE_SIZE / 1024 / 1024);
+        showToast(`Файл слишком большой (макс ${maxSizeMB}MB)`);
         this.attachedFile = null;
         this.fileInput.value = "";
         this.isSending = false;
         return;
       }
       
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          try {
-            const fileData = {
-              name: escapeHtml(this.attachedFile.name),
-              type: this.attachedFile.type,
-              size: this.attachedFile.size,
-              data: e.target.result // base64
-            };
-
-            const messageData = {
-              author: escapeHtml(this.myNickname),
-              userId: this.myUserId || null, // Добавляем userId для получения аватара
-              text: text ? escapeHtml(text) : '',
-              file: fileData,
-              timestamp: Date.now()
-            };
-
-            sendFirebaseMessage(this.roomRef, messageData)
-              .then(() => {
-                this.chatInput.value = "";
-                this.attachedFile = null;
-                this.fileInput.value = "";
-                this.hideFilePreview();
-                this.isSending = false;
-                resolve();
-              })
-              .catch(err => {
-                errorHandler.handle(err, { operation: 'sendMessage', hasFile: true });
-                showToast("Ошибка при отправке сообщения");
-                this.isSending = false;
-                reject(err);
-              });
-          } catch (err) {
-            errorHandler.handle(err, { operation: 'processFile', fileName: this.attachedFile?.name });
-            showToast("Ошибка при обработке файла");
-            this.hideFilePreview();
-            this.isSending = false;
-            reject(err);
-          }
+      try {
+        // Показываем прогресс загрузки
+        showToast("Загрузка файла на сервер...", 10000, 'info');
+        
+        // Загружаем файл на Catbox.moe
+        const fileData = await uploadFile(this.attachedFile, (percent) => {
+          // Можно добавить прогресс-бар позже
+          console.log(`Загрузка: ${percent}%`);
+        });
+        
+        console.log('✅ Файл загружен на Catbox:', fileData);
+        
+        // Отправляем сообщение с URL файла вместо base64
+        const messageData = {
+          author: escapeHtml(this.myNickname),
+          userId: this.myUserId || null,
+          text: text ? escapeHtml(text) : '',
+          file: {
+            url: fileData.url,
+            name: escapeHtml(fileData.name),
+            type: fileData.type,
+            size: fileData.size,
+            host: fileData.host
+          },
+          timestamp: Date.now()
         };
-        reader.onerror = () => {
-          showToast("Ошибка при чтении файла");
-          this.attachedFile = null;
-          this.fileInput.value = "";
-          this.hideFilePreview();
-          this.isSending = false;
-          reject(new Error("File read error"));
-        };
-        reader.readAsDataURL(this.attachedFile);
-      });
+
+        console.log('📤 Отправка сообщения с файлом в Firebase:', {
+          fileName: fileData.name,
+          fileUrl: fileData.url,
+          fileType: fileData.type,
+          fileSize: (fileData.size / 1024).toFixed(2) + ' KB'
+        });
+
+        await sendFirebaseMessage(this.roomRef, messageData);
+        
+        this.chatInput.value = "";
+        this.attachedFile = null;
+        this.fileInput.value = "";
+        this.hideFilePreview();
+        this.isSending = false;
+        
+        showToast("Файл отправлен", 3000, 'success');
+      } catch (err) {
+        errorHandler.handle(err, { operation: 'uploadFile', fileName: this.attachedFile?.name });
+        showToast(err.message || "Ошибка при загрузке файла", 5000, 'error');
+        this.isSending = false;
+        throw err;
+      }
     } else {
       // Обычное текстовое сообщение
       try {
