@@ -7,6 +7,55 @@
 import { errorHandler, ErrorCodes } from '../modules/error-handler.js';
 
 /**
+ * Загружает изображение на Imgur
+ * @param {File} file - Файл для загрузки
+ * @returns {Promise<Object>} Данные загруженного файла
+ */
+export async function uploadToImgur(file) {
+  try {
+    const formData = new FormData();
+    formData.append('image', file);
+    
+    console.log('📤 Загрузка изображения на Imgur:', {
+      name: file.name,
+      size: (file.size / 1024 / 1024).toFixed(2) + ' MB',
+      type: file.type
+    });
+
+    const response = await fetch('https://api.imgur.com/3/image', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Client-ID 546c25a59c58ad7'
+      },
+      body: formData
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ошибка загрузки на Imgur: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.success) {
+      throw new Error(data.data?.error || 'Imgur upload failed');
+    }
+
+    console.log('✅ Файл успешно загружен на Imgur:', data.data.link);
+
+    return {
+      url: data.data.link,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      host: 'imgur'
+    };
+  } catch (error) {
+    console.error('❌ Ошибка загрузки на Imgur:', error);
+    throw error;
+  }
+}
+
+/**
  * Загружает файл на Catbox.moe
  * @param {File} file - Файл для загрузки
  * @returns {Promise<Object>} Данные загруженного файла
@@ -43,8 +92,15 @@ export async function uploadToCatbox(file) {
     // Catbox возвращает просто URL в виде текста
     const url = await response.text();
     
-    if (!url || !url.startsWith('https://files.catbox.moe/')) {
-      throw new Error('Получен некорректный URL от Catbox');
+    console.log('📥 Ответ от Catbox:', url);
+    
+    if (!url || !url.trim()) {
+      throw new Error('Catbox вернул пустой ответ');
+    }
+    
+    if (!url.startsWith('https://files.catbox.moe/')) {
+      console.error('Некорректный URL от Catbox:', url);
+      throw new Error('Получен некорректный URL от Catbox: ' + url);
     }
 
     console.log('✅ Файл успешно загружен на Catbox:', url);
@@ -144,15 +200,43 @@ export async function uploadFileWithProgress(file, onProgress) {
 
 /**
  * Основная функция для загрузки файлов
- * Автоматически выбирает метод загрузки
+ * Автоматически выбирает метод загрузки с fallback
  * @param {File} file - Файл для загрузки
  * @param {Function} onProgress - Опциональный callback для прогресса
  * @returns {Promise<Object>} Данные загруженного файла
  */
 export async function uploadFile(file, onProgress = null) {
-  if (onProgress) {
-    return await uploadFileWithProgress(file, onProgress);
-  } else {
-    return await uploadToCatbox(file);
+  // Для изображений пробуем Imgur (не блокируется), для остального - Catbox
+  const isImage = file.type.startsWith('image/');
+  
+  try {
+    if (isImage) {
+      // Пробуем Imgur для изображений (работает везде)
+      console.log('🎯 Используем Imgur для изображения');
+      return await uploadToImgur(file);
+    } else {
+      // Для аудио/видео используем Catbox
+      console.log('🎯 Используем Catbox для файла');
+      if (onProgress) {
+        return await uploadFileWithProgress(file, onProgress);
+      } else {
+        return await uploadToCatbox(file);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Первая попытка не удалась:', error);
+    
+    // Fallback: если Imgur не сработал, пробуем Catbox
+    if (isImage) {
+      console.log('🔄 Fallback: пробуем Catbox для изображения');
+      try {
+        return await uploadToCatbox(file);
+      } catch (fallbackError) {
+        console.error('❌ Fallback тоже не сработал:', fallbackError);
+        throw new Error('Не удалось загрузить файл ни на один хостинг');
+      }
+    } else {
+      throw error;
+    }
   }
 }
