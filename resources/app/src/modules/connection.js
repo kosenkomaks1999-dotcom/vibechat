@@ -94,23 +94,25 @@ export class ConnectionManager {
       const now = Date.now();
       const timeSinceLastHeartbeat = now - this.lastHeartbeat;
       
-      // Логируем для отладки
-      console.log('🔍 Heartbeat check:', {
-        timeSinceLastHeartbeat: Math.round(timeSinceLastHeartbeat / 1000) + 's',
-        wasConnected: this.wasConnected,
-        threshold: '30s'
-      });
+      // Логируем для отладки (только если прошло много времени)
+      if (timeSinceLastHeartbeat > 20000) {
+        console.log('🔍 Heartbeat check:', {
+          timeSinceLastHeartbeat: Math.round(timeSinceLastHeartbeat / 1000) + 's',
+          wasConnected: this.wasConnected,
+          threshold: '45s'
+        });
+      }
       
-      // Если прошло больше 30 секунд без обновления, считаем соединение потерянным
+      // Если прошло больше 45 секунд без обновления, считаем соединение потерянным
       // ВАЖНО: проверяем только если wasConnected === true (не null и не false)
       // Это предотвращает ложное срабатывание при первом запуске
-      // Увеличен таймаут с 15 до 30 секунд для большей надежности
-      if (timeSinceLastHeartbeat > 30000 && this.wasConnected === true) {
+      // Увеличен таймаут с 30 до 45 секунд для предотвращения ложных срабатываний
+      if (timeSinceLastHeartbeat > 45000 && this.wasConnected === true) {
         console.warn('⚠️ Heartbeat timeout: соединение не отвечает');
         this.wasConnected = false;
         this.onStatusChange('disconnected');
       }
-    }, 10000); // Проверяем каждые 10 секунд вместо 5
+    }, 10000); // Проверяем каждые 10 секунд
   }
 
   /**

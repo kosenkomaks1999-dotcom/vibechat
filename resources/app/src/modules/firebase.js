@@ -3,7 +3,7 @@
  * Управляет подключением к Firebase и операциями с базой данных
  */
 
-import { errorHandler, ErrorCodes } from './error-handler.js';
+import { errorHandler } from './error-handler.js';
 
 /**
  * Инициализирует Firebase с конфигурацией
@@ -16,8 +16,30 @@ export function initFirebase() {
   
   const firebaseConfig = window.firebaseConfig;
   firebase.initializeApp(firebaseConfig);
+  
+  const database = firebase.database();
+  
+  // Включаем автоматическое переподключение и увеличиваем таймауты
+  // Это предотвращает отключение при длительных сессиях
+  database.goOnline(); // Явно включаем соединение
+  
+  // Настраиваем keepalive для предотвращения отключения
+  // Firebase автоматически переподключается, но мы добавляем явный мониторинг
+  const connectedRef = database.ref('.info/connected');
+  connectedRef.on('value', (snap) => {
+    if (snap.val() === true) {
+      console.log('✅ Firebase connected');
+    } else {
+      console.log('⚠️ Firebase disconnected, reconnecting...');
+      // Явно пытаемся переподключиться
+      setTimeout(() => {
+        database.goOnline();
+      }, 1000);
+    }
+  });
+  
   return {
-    database: firebase.database(),
+    database: database,
     auth: firebase.auth(),
     storage: firebase.storage()
   };

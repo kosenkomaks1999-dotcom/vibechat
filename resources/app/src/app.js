@@ -15,6 +15,7 @@ import { SpeechDetector } from './modules/speech.js';
 import { DevicesManager } from './modules/devices.js';
 import { ConnectionManager } from './modules/connection.js';
 import { WhiteboardManager } from './modules/whiteboard.js';
+import { RoomsManager } from './modules/rooms.js';
 import { playNotificationSound } from './modules/sounds.js';
 import { validateNicknameLength, validateNicknameFormat, escapeHtml } from './utils/security.js';
 import { compressImage } from './utils/image-utils.js';
@@ -26,7 +27,7 @@ import { FirebaseListenersManager } from './utils/firebase-listeners.js';
 
 document.addEventListener("DOMContentLoaded", async () => {
   // Версия приложения для отладки
-  const APP_VERSION = '1.1.0-performance-fix-v3';
+  const APP_VERSION = '1.0.17';
   
   // 🚨 КРИТИЧНО: Отключаем избыточное логирование для производительности
   const DEBUG_MODE = false; // Установите true для отладки
@@ -120,6 +121,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const MAX_RECONNECT_ATTEMPTS = 3; // Максимальное количество попыток
   let usersUpdateTimeout = null; // Таймер для debounce обновления пользователей
   let roomsUpdateTimeout = null; // Таймер для debounce обновления списка комнат
+  let heartbeatInterval = null; // Интервал для heartbeat (поддержание соединения)
+  let presenceCheckInterval = null; // Интервал для проверки присутствия в комнате
   
   // 🚀 ОПТИМИЗАЦИЯ: Кэш и менеджер слушателей
   const roomsCache = new RoomsCache();
@@ -132,6 +135,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const usersManager = new UsersManager(webrtc.audios, webrtc.userVolumes);
   let connectionManager = null; // Будет инициализирован позже
   let friendsManager = null; // Будет инициализирован после авторизации
+  let roomsManager = null; // Менеджер комнат (будет инициализирован после авторизации)
   // let friendsHandlers = null; // Обработчики друзей - временно отключено
   let roomHandlers = null; // Обработчики комнат (будет создан позже)
   let whiteboard = null; // Вайтборд для совместного рисования
@@ -166,9 +170,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     console.log('initApp() вызвана - показываем основное приложение');
     
     // Восстанавливаем размер окна для основного приложения
-    // Ширина увеличена на треть: 900 -> 1200, 800 -> 1065
+    // Размеры: 1200x720 (обычный), минимум: 1000x600
     if (window.electronAPI && window.electronAPI.restoreWindowSize) {
-      window.electronAPI.restoreWindowSize(1200, 650, 1065, 550, true);
+      window.electronAPI.restoreWindowSize(1200, 720, 1000, 600, true);
     }
     
     // Скрываем окно авторизации
@@ -203,6 +207,11 @@ document.addEventListener("DOMContentLoaded", async () => {
             ui.saveNickname(savedNickname);
             myNick = savedNickname;
             console.log('Никнейм загружен из Firebase:', savedNickname);
+            
+            // Синхронизируем с RoomsManager
+            if (roomsManager) {
+              roomsManager.setNickname(savedNickname);
+            }
           } else {
             // Если никнейма нет в Firebase, показываем сообщение
             ui.setNicknameDisplay('Не установлен');
@@ -456,6 +465,116 @@ document.addEventListener("DOMContentLoaded", async () => {
           }
         }
         
+        // Инициализируем менеджер комнат
+        if (!roomsManager) {
+          console.log('🏠 Инициализация RoomsManager...');
+          roomsManager = new RoomsManager({
+            db,
+            authManager,
+            ui,
+            webrtc,
+            chat,
+            devices,
+            usersManager,
+            speechDetector,
+            connectionManager,
+            logger,
+            playNotificationSound,
+            CONSTANTS,
+            roomsCache,
+            listenersManager
+          });
+          
+          // Устанавливаем callbacks для синхронизации состояния
+          roomsManager.callbacks.onJoined = (data) => {
+            console.log('🏠 RoomsManager.onJoined callback:', data);
+            
+            // Обновляем локальное состояние
+            roomRef = data.roomRef;
+            myUserRef = data.myUserRef;
+            myId = data.myId;
+            joined = true;
+            currentRoomId = data.roomId;
+            
+            // Обновляем другие модули
+            webrtc.roomRef = roomRef;
+            webrtc.myId = myId;
+            if (chat) {
+              chat.roomRef = roomRef;
+            }
+            speechDetector.setMyId(myId);
+            
+            // Инициализация микрофона
+            const deviceId = devices.getSelectedMicId();
+            webrtc.initMicrophone(deviceId, muted).then(() => {
+              updateSpeechDetector();
+            }).catch(err => {
+              console.error('Ошибка инициализации микрофона:', err);
+            });
+            
+            // Применяем сохраненные динамики
+            const savedSpeakerId = devices.getSelectedSpeakerId();
+            if (savedSpeakerId) {
+              webrtc.applySpeakerSelection(savedSpeakerId);
+            }
+            
+            // Очищаем чат
+            if (chat) {
+              chat.clear();
+            }
+            clearRoomMessages(roomRef);
+            
+            // Переинициализируем мониторинг подключения
+            if (connectionManager) {
+              connectionManager.cleanup();
+              connectionManager.init();
+            }
+            
+            // Запускаем слушатели, heartbeat и проверку присутствия
+            setupListeners();
+            startHeartbeat();
+            startPresenceCheck();
+            
+            // Запускаем детектор речи
+            if (speechDetector && typeof speechDetector.startDetection === 'function') {
+              speechDetector.startDetection();
+              console.log('✅ Детектор речи запущен после входа в комнату');
+            }
+          };
+          
+          roomsManager.callbacks.onLeft = () => {
+            console.log('🏠 RoomsManager.onLeft callback');
+            
+            // Очищаем состояние
+            roomRef = null;
+            myUserRef = null;
+            myId = null;
+            joined = false;
+            currentRoomId = null;
+            
+            // Очищаем модули
+            webrtc.cleanup();
+            webrtc.roomRef = null;
+            webrtc.myId = null;
+            if (chat) {
+              chat.clear();
+              chat.roomRef = null;
+            }
+            usersManager.clear();
+            stopHeartbeat();
+            stopPresenceCheck();
+            if (speechDetector && typeof speechDetector.stopDetection === 'function') {
+              speechDetector.stopDetection();
+            }
+          };
+          
+          // Устанавливаем начальные значения
+          roomsManager.setNickname(myNick);
+          roomsManager.setMuted(muted);
+          
+          console.log('✅ RoomsManager инициализирован');
+        }
+        
       // Устанавливаем онлайн статус
       await setUserOnlineStatus(db, currentUser.uid, true);
       } else {
@@ -463,8 +582,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
     
-    // Загружаем список комнат после инициализации пользователя
-    // Используем несколько задержек для надежности: сначала ждем готовности UI, потом загружаем данные
+    // 🔧 FIX: Убираем автоматическое переключение вкладок при инициализации
+    // Вкладка "Комнаты" уже активна по умолчанию в HTML
+    // Загружаем список комнат БЕЗ переключения вкладок
+    // 🚀 ОПТИМИЗАЦИЯ: Увеличена задержка до 800ms для полной инициализации Firebase listeners
     setTimeout(async () => {
       try {
         const currentUser = authManager?.getCurrentUser();
@@ -474,95 +595,43 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
         
         console.log('🔵 Инициализация загрузки списка комнат для пользователя:', currentUser.uid);
-        console.log('🔵 Проверка состояния db:', !!db);
-        console.log('🔵 Проверка loadRoomsList:', typeof loadRoomsList);
         
-        // ВАЖНО: Убеждаемся, что вкладка "Комнаты" активна и контент виден при входе
-        const roomsTab = document.getElementById('roomsTab');
-        const roomsContent = document.getElementById('roomsContent');
-        const friendsTab = document.getElementById('friendsTab');
-        const friendsContent = document.getElementById('friendsContent');
-        
-        console.log('🔵 Проверка элементов UI:', {
-          roomsTab: !!roomsTab,
-          roomsContent: !!roomsContent,
-          roomsList: !!ui.elements.roomsList,
-          roomsEmpty: !!ui.elements.roomsEmpty
-        });
-        
-        if (roomsTab && roomsContent) {
-          console.log('✅ Активируем вкладку "Комнаты" при входе в приложение...');
-          // Активируем вкладку "Комнаты"
-          roomsTab.classList.add('active');
-          roomsContent.classList.add('active');
-          // Деактивируем вкладку "Друзья"
-          if (friendsTab) friendsTab.classList.remove('active');
-          if (friendsContent) friendsContent.classList.remove('active');
-          console.log('✅ Вкладка "Комнаты" активирована');
-        } else {
-          console.error('❌ Элементы вкладок не найдены:', {
-            roomsTab: !!roomsTab,
-            roomsContent: !!roomsContent
-          });
-          // Если элементы не найдены, пробуем еще раз через 500ms
-          setTimeout(() => {
-            console.log('🔄 Повторная попытка активации вкладки...');
-            const retryRoomsTab = document.getElementById('roomsTab');
-            const retryRoomsContent = document.getElementById('roomsContent');
-            if (retryRoomsTab && retryRoomsContent) {
-              retryRoomsTab.classList.add('active');
-              retryRoomsContent.classList.add('active');
-              loadRoomsList().catch(err => console.error('Ошибка при повторной загрузке комнат:', err));
-              startRoomsListener();
-            }
-          }, 500);
-        }
-        
-        // Ждем еще немного, чтобы убедиться, что UI полностью готов
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Пытаемся загрузить комнаты сразу после инициализации
-        // Функции могут быть еще не определены, поэтому используем проверку
-        console.log('🔵 Попытка загрузки комнат из initApp...');
-        
-        // Ждем, пока функции будут определены (максимум 5 секунд)
-        let attempts = 0;
-        const maxAttempts = 10;
-        const tryLoad = async () => {
-          attempts++;
-          if (typeof loadRoomsList === 'function' && typeof startRoomsListener === 'function') {
-            console.log('✅ Функции найдены, загружаем комнаты из initApp...');
-            try {
-              isInitialLoad = true;
-              await loadRoomsList(true);
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              roomsListInitialized = true;
-              if (!roomsListener) {
-                startRoomsListener();
-              }
-              setTimeout(() => {
-                isInitialLoad = false;
-              }, 2000);
-              console.log('✅ Комнаты загружены из initApp');
-            } catch (error) {
-              console.error('❌ Ошибка загрузки комнат из initApp:', error.message || error);
-              if (error.stack) console.error(error.stack);
-            }
-          } else if (attempts < maxAttempts) {
-            setTimeout(tryLoad, 500);
-          } else {
-            console.log('⏳ Функции еще не определены, будет использована автоматическая загрузка');
+        // Загружаем комнаты через RoomsManager
+        if (roomsManager) {
+          console.log('✅ RoomsManager готов, загружаем комнаты из initApp...');
+          try {
+            // Устанавливаем флаги через RoomsManager
+            roomsManager._updateState({ isInitialLoad: true });
+            isInitialLoad = true; // Синхронизируем с локальной переменной
+            
+            await roomsManager.loadList(true);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            roomsListInitialized = true;
+            roomsManager._updateState({ roomsListInitialized: true });
+            
+            roomsManager.startListener();
+            
+            setTimeout(() => {
+              isInitialLoad = false;
+              roomsManager._updateState({ isInitialLoad: false });
+            }, 1000);
+            
+            console.log('✅ Комнаты загружены из initApp через RoomsManager');
+          } catch (error) {
+            console.error('❌ Ошибка загрузки комнат из initApp:', error.message || error);
+            if (error.stack) console.error(error.stack);
           }
-        };
-        
-        tryLoad();
+        } else {
+          console.warn('⚠️ RoomsManager не инициализирован');
+        }
         
         console.log('=== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ЗАВЕРШЕНА ===');
       } catch (error) {
         console.error('❌ Ошибка при загрузке списка комнат в initApp:', error);
         console.error('Детали ошибки:', error.message, error.code, error.stack);
       }
-    }, 500); // Увеличена задержка до 500ms для надежности
+    }, 800); // 🚀 ОПТИМИЗАЦИЯ: Увеличена задержка до 800ms для полной инициализации Firebase
   }
 
   // Обработчики форм авторизации (только если authManager инициализирован)
@@ -683,33 +752,93 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // Простая функция скрытия splash screen и показа нужного окна
+  // 🎨 Улучшенная функция скрытия splash screen с плавным переходом
   let splashProcessed = false;
-  function hideSplashAndShow(isAuthorized) {
+  async function hideSplashAndShow(isAuthorized) {
     // Защита от повторных вызовов
     if (splashProcessed) return;
     splashProcessed = true;
+
+    if (isAuthorized) {
+      // Пользователь авторизован - загружаем данные перед показом приложения
+      try {
+        updateSplashProgress(70, 'Загрузка комнат...');
+        
+        // 🔧 FIX: Запускаем глобальный слушатель комнат ДО загрузки списка
+        if (roomsManager && !roomsListener) {
+          roomsManager.startListener();
+          console.log('✅ Глобальный слушатель комнат запущен на splash screen');
+        }
+        
+        // Загружаем комнаты
+        if (roomsManager) {
+          await roomsManager.loadList(true).catch(() => {});
+        }
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        updateSplashProgress(85, 'Загрузка друзей...');
+        
+        // Загружаем друзей если friendsManager инициализирован
+        if (friendsManager) {
+          await Promise.all([
+            friendsManager.loadFriends().catch(() => {}),
+            friendsManager.loadNotifications().catch(() => {})
+          ]);
+        }
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        updateSplashProgress(100, 'Готово!');
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // 🔧 FIX: Инициализируем приложение ДО скрытия splash screen
+        console.log('🚀 Инициализация приложения на splash screen...');
+        initApp();
+        console.log('✅ Приложение полностью инициализировано');
+        
+      } catch (error) {
+        console.error('Ошибка при загрузке данных:', error);
+      }
+    }
 
     // Скрываем splash screen с анимацией
     if (splashScreen && !splashScreen.classList.contains('fade-out')) {
       splashScreen.classList.add('fade-out');
       
-      // После завершения анимации (1.2 секунды)
+      // Начинаем показывать целевое окно с небольшой задержкой (для перекрытия анимаций)
       setTimeout(() => {
-        // Удаляем splash screen из DOM
+        if (isAuthorized) {
+          // Пользователь авторизован - показываем основное приложение
+          if (appContent) {
+            appContent.style.opacity = '0';
+            appContent.style.display = 'flex';
+            // Плавное появление
+            setTimeout(() => {
+              appContent.style.transition = 'opacity 0.8s ease-in';
+              appContent.style.opacity = '1';
+            }, 50);
+          }
+          // initApp() уже вызван выше
+        } else {
+          // Пользователь не авторизован - показываем окно авторизации
+          if (authWindow) {
+            authWindow.style.opacity = '0';
+            authWindow.style.display = 'flex';
+            // Плавное появление
+            setTimeout(() => {
+              authWindow.style.transition = 'opacity 0.8s ease-in';
+              authWindow.style.opacity = '1';
+            }, 50);
+          }
+          showAuth();
+        }
+      }, 800); // Начинаем показывать новое окно за 400ms до полного исчезновения splash
+      
+      // Удаляем splash screen после завершения анимации
+      setTimeout(() => {
         if (splashScreen && splashScreen.parentNode) {
           splashScreen.remove();
         }
-        
-        // Показываем нужное окно
-        if (isAuthorized) {
-          // Пользователь авторизован - показываем основное приложение
-          initApp();
-        } else {
-          // Пользователь не авторизован - показываем окно авторизации
-          showAuth();
-        }
-      }, 1200);
+      }, 1500);
     } else {
       // Если splash screen уже скрыт или удален, сразу показываем нужное окно
       if (isAuthorized) {
@@ -720,11 +849,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  // 🎨 Управление индикатором загрузки
+  const splashProgress = document.getElementById('splashProgress');
+  const splashLoadingText = document.getElementById('splashLoadingText');
+  
+  function updateSplashProgress(percent, text) {
+    if (splashProgress) {
+      splashProgress.style.width = percent + '%';
+    }
+    if (splashLoadingText && text) {
+      splashLoadingText.textContent = text;
+    }
+  }
+  
+  // Реальная загрузка с привязкой к операциям
+  updateSplashProgress(0, 'Инициализация...');
+  
   // Проверка авторизации при загрузке
   if (authManager) {
-    // Минимальное время показа splash screen - 2 секунды
-    const minSplashTime = 2000;
-    const splashStartTime = Date.now();
     let authStateResolved = false;
     
     // ВРЕМЕННО: Принудительно выходим из аккаунта для тестирования
@@ -733,7 +875,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     // Подписываемся на изменения состояния авторизации
     // onAuthStateChanged срабатывает сразу при подписке с текущим состоянием пользователя
-    authManager.onAuthStateChanged((user) => {
+    authManager.onAuthStateChanged(async (user) => {
       // Игнорируем повторные вызовы (только первый вызов)
       if (authStateResolved) {
         console.log('onAuthStateChanged вызван повторно, игнорируем');
@@ -741,13 +883,19 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       authStateResolved = true;
       
+      // 20% - Подключение к Firebase завершено
+      updateSplashProgress(20, 'Подключение к Firebase...');
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
       // Проверяем, авторизован ли пользователь
-      // user будет null если пользователь не авторизован
       const isAuthorized = user !== null && user !== undefined;
       
       console.log('=== ПРОВЕРКА АВТОРИЗАЦИИ ===');
       console.log('user:', user);
       console.log('isAuthorized:', isAuthorized);
+      
+      // 40% - Загрузка модулей
+      updateSplashProgress(40, 'Загрузка модулей...');
       
       // Логируем в файл (неблокирующее)
       logger.info('Проверка авторизации', {
@@ -763,31 +911,38 @@ document.addEventListener("DOMContentLoaded", async () => {
         console.log('Пользователь НЕ авторизован (user === null)');
       }
       
-      // Вычисляем сколько времени прошло
-      const elapsed = Date.now() - splashStartTime;
-      const remainingTime = Math.max(0, minSplashTime - elapsed);
+      await new Promise(resolve => setTimeout(resolve, 100));
       
-      console.log('Ожидаем', remainingTime, 'ms перед показом окна');
+      // 60% - Проверка авторизации завершена
+      updateSplashProgress(60, 'Проверка авторизации...');
+      await new Promise(resolve => setTimeout(resolve, 100));
       
-      // Ждем оставшееся время (минимум 2 секунды), затем скрываем splash и показываем нужное окно
-      setTimeout(() => {
-        if (isAuthorized) {
-          console.log('>>> Показываем ОСНОВНОЕ ПРИЛОЖЕНИЕ (пользователь авторизован)');
-          logger.info('Показываем основное приложение', { email: user.email }).catch(() => {});
-          hideSplashAndShow(true);
-        } else {
-          console.log('>>> Показываем ОКНО АВТОРИЗАЦИИ (пользователь НЕ авторизован)');
-          logger.info('Показываем окно авторизации').catch(() => {});
-          hideSplashAndShow(false);
-        }
-      }, remainingTime);
+      // Показываем окно
+      if (isAuthorized) {
+        console.log('>>> Показываем ОСНОВНОЕ ПРИЛОЖЕНИЕ (пользователь авторизован)');
+        logger.info('Показываем основное приложение', { email: user.email }).catch(() => {});
+        await hideSplashAndShow(true);
+      } else {
+        console.log('>>> Показываем ОКНО АВТОРИЗАЦИИ (пользователь НЕ авторизован)');
+        logger.info('Показываем окно авторизации').catch(() => {});
+        updateSplashProgress(100, 'Готово!');
+        await new Promise(resolve => setTimeout(resolve, 200));
+        await hideSplashAndShow(false);
+      }
     });
   } else {
-    // Если authManager не инициализирован, просто показываем окно авторизации через 2 секунды
+    // Если authManager не инициализирован, показываем окно авторизации с прогрессом
     console.log('authManager не инициализирован, показываем окно авторизации');
+    
+    // Симулируем этапы загрузки
+    setTimeout(() => updateSplashProgress(20, 'Подключение к Firebase...'), 100);
+    setTimeout(() => updateSplashProgress(40, 'Загрузка модулей...'), 200);
+    setTimeout(() => updateSplashProgress(60, 'Проверка авторизации...'), 300);
+    setTimeout(() => updateSplashProgress(100, 'Готово!'), 400);
+    
     setTimeout(() => {
       hideSplashAndShow(false);
-    }, 2000);
+    }, 800);
   }
 
   // Инициализация элементов чата будет выполнена после авторизации в initApp()
@@ -1122,6 +1277,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           ui.setNicknameDisplay(newNickname);
           ui.saveNickname(newNickname);
           logger.info('Никнейм обновлен', { oldNickname, newNickname }).catch(() => {});
+          
+          // Синхронизируем с RoomsManager
+          if (roomsManager) {
+            roomsManager.setNickname(newNickname);
+          }
         } else if (!oldNickname) {
           // Если никнейма не было, просто резервируем новый
           const nicknameTaken = await isNicknameTaken(db, newNickname);
@@ -1135,6 +1295,11 @@ document.addEventListener("DOMContentLoaded", async () => {
           ui.setNicknameDisplay(newNickname);
           ui.saveNickname(newNickname);
           logger.info('Никнейм установлен', { newNickname }).catch(() => {});
+          
+          // Синхронизируем с RoomsManager
+          if (roomsManager) {
+            roomsManager.setNickname(newNickname);
+          }
         }
 
         // Сохраняем аватар, если он изменился
@@ -1186,6 +1351,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     ui.updateMuteButton(muted);
     updateUserMuteStatus(myUserRef, muted);
     updateSpeechDetector();
+    
+    // Синхронизируем с RoomsManager
+    if (roomsManager) {
+      roomsManager.setMuted(muted);
+    }
   };
 
   if (ui.elements.muteBtn) {
@@ -1351,6 +1521,58 @@ document.addEventListener("DOMContentLoaded", async () => {
     ui.elements.chatInput.addEventListener("keypress", (e) => {
       if (e.key === "Enter" && chat) {
         chat.sendMessage(ui.showToast.bind(ui));
+      }
+    });
+
+    // Обработчик вставки изображений через Ctrl+V
+    ui.elements.chatInput.addEventListener("paste", async (e) => {
+      const items = e.clipboardData?.items;
+      if (!items || !chat) return;
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        
+        // Проверяем, является ли элемент изображением
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          
+          const file = item.getAsFile();
+          if (file) {
+            console.log('📋 Вставка изображения из буфера обмена:', file.name, file.type);
+            await chat.attachFile(file, ui.showToast.bind(ui));
+          }
+          break;
+        }
+      }
+    });
+
+    // Обработчик drag-and-drop для изображений
+    ui.elements.chatInput.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.elements.chatInput.style.backgroundColor = 'rgba(74, 171, 247, 0.1)';
+    });
+
+    ui.elements.chatInput.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.elements.chatInput.style.backgroundColor = '';
+    });
+
+    ui.elements.chatInput.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ui.elements.chatInput.style.backgroundColor = '';
+
+      if (!chat) return;
+
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) {
+        const file = files[0];
+        console.log('🎯 Перетаскивание файла:', file.name, file.type);
+        
+        // Прикрепляем файл (валидация типа происходит в attachFile)
+        await chat.attachFile(file, ui.showToast.bind(ui));
       }
     });
   }
@@ -1641,20 +1863,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (ui.elements.forceUpdateBtn) {
     ui.elements.forceUpdateBtn.addEventListener("click", () => {
-      console.log('🔄 Нажата кнопка принудительного обновления');
-      if (window.electronAPI && window.electronAPI.forceDownloadUpdate) {
-        console.log('✅ Начинаем принудительную загрузку');
-        // Меняем текст на "Обновляется..."
-        if (ui.elements.updateStatusText) {
-          ui.elements.updateStatusText.textContent = 'Обновляется...';
-        }
-        if (ui.elements.forceUpdateBtn) {
-          ui.elements.forceUpdateBtn.style.display = 'none';
-        }
-        window.electronAPI.forceDownloadUpdate();
-      } else {
-        console.error('❌ electronAPI.forceDownloadUpdate недоступен');
-      }
+      console.log('🔄 Нажата кнопка переустановки - открываем страницу релизов');
+      // Открываем страницу релизов в системном браузере
+      const link = document.createElement('a');
+      link.href = 'https://github.com/kosenkomaks1999-dotcom/vibechat/releases';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.click();
     });
   }
 
@@ -1771,493 +1986,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Функции работы с комнатами
 
   /**
-   * Показывает модальное окно создания комнаты
-   */
-  function showCreateRoomModal() {
-    if (joined) {
-      ui.showToast("Сначала выйдите из текущей комнаты");
-      return;
-    }
-
-    // Генерируем ID комнаты
-    generateUniqueRoomId(db, 8).then(roomId => {
-      if (ui.elements.createRoomModal && ui.elements.roomIdDisplayInput) {
-        ui.elements.roomIdDisplayInput.value = roomId;
-        ui.elements.createRoomModal.classList.add('show');
-        if (ui.elements.roomNameInput) {
-          ui.elements.roomNameInput.value = '';
-          ui.elements.roomNameInput.focus();
-        }
-        if (ui.elements.createRoomError) {
-          ui.elements.createRoomError.textContent = '';
-          ui.elements.createRoomError.style.display = 'none';
-        }
-      }
-    }).catch(error => {
-      console.error('Ошибка при генерации ID комнаты:', error);
-      ui.showToast('Ошибка при создании комнаты');
-    });
-  }
-
-  /**
-   * Создает новую комнату с названием
-   */
-  async function createRoomWithName(roomId, roomName) {
-    if (joinLock) return;
-    if (joined) {
-      return;
-    }
-
-    if (!roomName || !roomName.trim()) {
-      if (ui.elements.createRoomError) {
-        ui.elements.createRoomError.textContent = 'Введите название комнаты';
-        ui.elements.createRoomError.style.display = 'block';
-      }
-      return;
-    }
-
-    joinLock = true;
-    try {
-      // Никнейм загружается из Firebase, проверяем что он установлен
-      if (!myNick || myNick === CONSTANTS.DEFAULT_NICKNAME) {
-        ui.showToast("Никнейм не загружен. Перезайдите в аккаунт.");
-        joinLock = false;
-        return;
-      }
-
-      const currentUser = authManager.getCurrentUser();
-      if (!currentUser) {
-        ui.showToast("Пользователь не авторизован");
-        joinLock = false;
-        return;
-      }
-
-      // Создаем комнату с названием и создателем
-      console.log('Создание комнаты:', { roomId, roomName: roomName.trim(), creatorId: currentUser.uid });
-      const createdRoomRef = await createRoomWithNameFirebase(db, roomId, roomName.trim(), currentUser.uid);
-      console.log('Комната успешно создана в Firebase:', createdRoomRef.key);
-      
-      // Проверяем, что комната действительно создана
-      const roomSnapshot = await createdRoomRef.once('value');
-      if (roomSnapshot.exists()) {
-        console.log('Подтверждение: комната существует в Firebase:', roomSnapshot.val());
-        // Логируем создание комнаты
-        await logger.logRoom('CREATE', 'Комната создана', {
-          roomId: roomId,
-          roomName: roomName.trim(),
-          creatorId: currentUser.uid,
-          creatorEmail: currentUser.email,
-          createdAt: Date.now(),
-          roomData: roomSnapshot.val()
-        }).catch(() => {});
-      } else {
-        console.error('ОШИБКА: комната не найдена в Firebase после создания!');
-        await logger.logRoom('CREATE', 'ОШИБКА: комната не найдена после создания', {
-          roomId: roomId,
-          roomName: roomName.trim(),
-          creatorId: currentUser.uid,
-          error: 'Room not found after creation'
-        }).catch(() => {});
-      }
-      
-      // Убеждаемся, что чат инициализирован
-      if (!chat) {
-        chat = new ChatManager(null, myNick, currentUser.uid, db);
-        chat.initElements(
-          ui.elements.chatMessages,
-          ui.elements.chatInput,
-          ui.elements.fileInput
-        );
-        chat.showEmptyState();
-      }
-      
-      if (chat) {
-        chat.myNickname = myNick;
-      }
-
-      // Инициализация микрофона
-      const deviceId = devices.getSelectedMicId();
-      await webrtc.initMicrophone(deviceId, muted);
-      updateSpeechDetector(); // Обновляем детектор речи
-      
-      // Применяем сохраненные динамики
-      const savedSpeakerId = devices.getSelectedSpeakerId();
-      if (savedSpeakerId) {
-        webrtc.applySpeakerSelection(savedSpeakerId);
-      }
-
-      roomRef = getRoomRef(db, roomId);
-      console.log(`[JOIN ROOM] Setting roomRef to: ${roomRef.key}`);
-      webrtc.roomRef = roomRef;
-      if (chat) {
-        chat.roomRef = roomRef;
-      }
-
-      // Проверяем, не создаем ли мы дубликат пользователя
-      const existingUsers = await roomRef.child("users").once("value");
-      const existingUsersData = existingUsers.val() || {};
-      
-      // Проверяем, нет ли уже пользователя с таким же ID
-      if (myId && existingUsersData[myId]) {
-        await roomRef.child("users").child(myId).remove().catch(() => {});
-      }
-
-      // Получаем Firebase userId для сохранения в комнате
-      const currentUserForRoom = authManager.getCurrentUser();
-      const firebaseUserId = currentUserForRoom ? currentUserForRoom.uid : null;
-      
-      console.log('🔵 Создание записи пользователя в комнате:', { 
-        roomId, 
-        myNick, 
-        muted, 
-        firebaseUserId,
-        currentUser: currentUserForRoom
-      });
-      
-      if (!firebaseUserId) {
-        console.warn('⚠️ ВНИМАНИЕ: Firebase userId не найден! Это может помешать добавлению в друзья через ПКМ.');
-      }
-      
-      try {
-        const speakerMuted = webrtc.speakerMuted || false;
-        myUserRef = createUserInRoom(roomRef, myNick, muted, firebaseUserId, speakerMuted);
-        myId = myUserRef.key;
-        webrtc.myId = myId;
-        speechDetector.setMyId(myId);
-        console.log('✅ Пользователь добавлен в комнату:', { 
-          pushId: myId, 
-          firebaseUserId: firebaseUserId,
-          nickname: myNick 
-        });
-      } catch (userError) {
-        console.error('❌ Ошибка при добавлении пользователя в комнату:', userError);
-        console.error('Детали ошибки:', {
-          code: userError.code,
-          message: userError.message,
-          stack: userError.stack
-        });
-        ui.showToast('Ошибка при создании комнаты: ' + (userError.message || 'Неизвестная ошибка'));
-        joinLock = false;
-        throw userError;
-      }
-
-      // Настраиваем onDisconnect с задержкой - пользователь удаляется только если
-      // соединение не восстановилось в течение 30 секунд
-      // Это дает время на автоматическое переподключение
-      myUserRef.onDisconnect().remove();
-
-      joined = true;
-      intentionalLeave = false;
-      reconnectAttempts = 0; // Сбрасываем счетчик при успешном подключении
-      
-      // Устанавливаем текущую комнату
-      currentRoomId = roomId;
-      console.log('✅ Установлен currentRoomId при создании комнаты:', roomId, 'joined:', joined);
-      
-      ui.updateJoinButton(true);
-      if (chat) {
-      chat.clear();
-      }
-      clearRoomMessages(roomRef);
-      
-      // Показываем панель участников
-      if (ui.elements.usersPanel) {
-        ui.elements.usersPanel.style.display = 'flex';
-      }
-      
-      // Обновляем отображение ID комнаты
-      ui.updateRoomId(roomId);
-      
-      // Переинициализируем мониторинг подключения
-      if (connectionManager) {
-        connectionManager.cleanup();
-        connectionManager.init();
-      }
-
-      // Обновляем счетчик участников
-      roomRef.child("users").once("value").then(snap => {
-        const count = snap.numChildren();
-        ui.updateUsersCount(count);
-        previousUsersCount = count;
-        
-        // АВТООЧИСТКА: Если мы единственный пользователь - очищаем старую доску
-        if (count === 1) {
-          console.log(`[AUTO-CLEAR] Room was empty, clearing old whiteboard data`);
-          roomRef.child('whiteboard/strokes').remove().then(() => {
-            console.log(`[AUTO-CLEAR] Old whiteboard data cleared successfully`);
-          }).catch(err => {
-            console.error(`[AUTO-CLEAR] Error clearing old data:`, err);
-          });
-        }
-      });
-
-      setupListeners();
-      playNotificationSound('join');
-      ui.showToast(`Комната "${roomName}" создана`);
-      
-      // Обновляем список комнат после создания
-      // Используем небольшую задержку, чтобы дать Firebase время сохранить данные
-      setTimeout(() => {
-        // Слушатель должен обновить автоматически, но на всякий случай вызываем явно
-        // Используем force = false, чтобы не создавать дубликаты логов
-        loadRoomsList(false).catch(err => console.error('Ошибка при обновлении списка комнат:', err));
-      }, 300);
-
-      // Закрываем модальное окно
-      if (ui.elements.createRoomModal) {
-        ui.elements.createRoomModal.classList.remove('show');
-      }
-
-      // Список комнат обновляется автоматически через слушатель
-
-    } catch (err) {
-      console.error('❌ ОШИБКА при создании комнаты:', err);
-      console.error('Детали ошибки:', {
-        code: err.code,
-        message: err.message,
-        stack: err.stack,
-        roomId: roomId,
-        roomName: roomName
-      });
-      
-      // Показываем более подробное сообщение об ошибке
-      let errorMessage = "Ошибка при создании комнаты";
-      if (err.code) {
-        errorMessage += ` (${err.code})`;
-      }
-      if (err.message) {
-        errorMessage += `: ${err.message}`;
-      }
-      ui.showToast(errorMessage, 5000, 'error');
-      
-      if (ui.elements.createRoomError) {
-        ui.elements.createRoomError.textContent = errorMessage;
-        ui.elements.createRoomError.style.display = 'block';
-      }
-    } finally {
-      joinLock = false;
-    }
-  }
-
-  /**
-   * Присоединяется к существующей комнате по ID
-   */
-  async function findAndJoinRoom(roomId) {
-    if (joinLock) return;
-    // Если уже в комнате, просто выходим (не переподключаемся!)
-    if (joined) {
-      return; // Просто выходим, не переподключаемся
-    }
-    joinLock = true;
-    try {
-      if (!roomId || !roomId.trim()) {
-        ui.showToast("Введите Room ID");
-        joinLock = false;
-        return;
-      }
-
-      roomId = roomId.trim();
-
-      // Никнейм загружается из Firebase, проверяем что он установлен
-      if (!myNick || myNick === CONSTANTS.DEFAULT_NICKNAME) {
-        ui.showToast("Никнейм не загружен. Перезайдите в аккаунт.");
-        joinLock = false;
-        return;
-      }
-
-      // Проверяем существование комнаты
-      const exists = await roomExists(db, roomId);
-      if (!exists) {
-        ui.showToast("Комната не существует");
-        joinLock = false;
-        return;
-      }
-
-      // Убеждаемся, что чат инициализирован перед присоединением к комнате
-      if (!chat && authManager) {
-        const currentUser = authManager.getCurrentUser();
-        if (currentUser) {
-          chat = new ChatManager(null, myNick, currentUser.uid, db);
-          chat.initElements(
-            ui.elements.chatMessages,
-            ui.elements.chatInput,
-            ui.elements.fileInput
-          );
-          chat.showEmptyState();
-        }
-      }
-      
-      // Никнейм уже загружен из Firebase
-      if (chat) {
-        chat.myNickname = myNick;
-      }
-
-      // Инициализация микрофона
-      const deviceId = devices.getSelectedMicId();
-      await webrtc.initMicrophone(deviceId, muted);
-      updateSpeechDetector(); // Обновляем детектор речи
-      
-      // Применяем сохраненные динамики
-      const savedSpeakerId = devices.getSelectedSpeakerId();
-      if (savedSpeakerId) {
-        webrtc.applySpeakerSelection(savedSpeakerId);
-      }
-
-      roomRef = getRoomRef(db, roomId);
-      console.log(`[JOIN ROOM] Setting roomRef to: ${roomRef.key}`);
-      webrtc.roomRef = roomRef;
-      if (chat) {
-      chat.roomRef = roomRef;
-      }
-      webrtc.myId = myId;
-
-      // Проверка лимита пользователей
-      const usersSnap = await roomRef.child("users").once("value");
-      const existingUsersDataForJoin = usersSnap.val() || {};
-      
-      // Проверяем, нет ли уже пользователя с таким же ID (если мы уже были в комнате)
-      if (myId && existingUsersDataForJoin[myId]) {
-        // Удаляем старую запись перед созданием новой
-        await roomRef.child("users").child(myId).remove().catch(() => {});
-      }
-      
-      // Пересчитываем количество пользователей после удаления дубликата
-      const usersAfterCleanup = await roomRef.child("users").once("value");
-      if (usersAfterCleanup.numChildren() >= CONSTANTS.MAX_USERS) {
-        ui.showToast(`Комната заполнена (макс ${CONSTANTS.MAX_USERS} участников)`);
-        joinLock = false;
-        return;
-      }
-
-      // Получаем Firebase userId для сохранения в комнате
-      const currentUserForJoin = authManager.getCurrentUser();
-      const firebaseUserIdJoin = currentUserForJoin ? currentUserForJoin.uid : null;
-      
-      console.log('🔵 Присоединение к комнате - создание записи пользователя:', {
-        roomId,
-        myNick,
-        muted,
-        firebaseUserId: firebaseUserIdJoin
-      });
-      
-      if (!firebaseUserIdJoin) {
-        console.warn('⚠️ ВНИМАНИЕ: Firebase userId не найден при присоединении к комнате!');
-      }
-      
-      const speakerMuted = webrtc.speakerMuted || false;
-      myUserRef = createUserInRoom(roomRef, myNick, muted, firebaseUserIdJoin, speakerMuted);
-      myId = myUserRef.key;
-      webrtc.myId = myId;
-      speechDetector.setMyId(myId);
-      
-      console.log('✅ Пользователь добавлен в комнату (присоединение):', {
-        pushId: myId,
-        firebaseUserId: firebaseUserIdJoin,
-        nickname: myNick
-      });
-
-      // Настраиваем onDisconnect с задержкой - пользователь удаляется только если
-      // соединение не восстановилось в течение 30 секунд
-      // Это дает время на автоматическое переподключение
-      myUserRef.onDisconnect().remove();
-      // Комната больше не удаляется автоматически при выходе всех пользователей
-
-      joined = true;
-      intentionalLeave = false; // Сбрасываем флаг при успешном подключении
-      reconnectAttempts = 0; // Сбрасываем счетчик при успешном подключении
-      
-      // Устанавливаем текущую комнату
-      currentRoomId = roomId;
-      console.log('✅ Установлен currentRoomId при входе в комнату:', roomId, 'joined:', joined);
-      
-      // Логируем вход в комнату
-      const currentUser = authManager.getCurrentUser();
-      if (currentUser) {
-        const roomInfo = await getRoomInfo(db, roomId).catch(() => null);
-        await logger.logRoom('ENTER', 'Вход в комнату', {
-          roomId: roomId,
-          roomName: roomInfo?.name || 'Неизвестно',
-          userId: currentUser.uid,
-          userEmail: currentUser.email,
-          userNickname: myNick,
-          timestamp: Date.now()
-        }).catch(() => {});
-      }
-      
-      ui.updateJoinButton(true);
-      if (chat) {
-      chat.clear();
-      }
-      
-      // Показываем панель участников
-      if (ui.elements.usersPanel) {
-        ui.elements.usersPanel.style.display = 'flex';
-      }
-      
-      // Обновляем отображение ID комнаты
-      ui.updateRoomId(roomId);
-      
-      // Переинициализируем мониторинг подключения при подключении к комнате
-      if (connectionManager) {
-        connectionManager.cleanup();
-        connectionManager.init();
-      }
-
-      // Удаляем старые сообщения и очищаем доску если комната была пуста
-      roomRef.child("users").once("value").then(snap => {
-        const count = snap.numChildren();
-        ui.updateUsersCount(count);
-        previousUsersCount = count;
-        
-        if (count === 1) {
-          clearRoomMessages(roomRef);
-          
-          // АВТООЧИСТКА: Очищаем старую доску
-          console.log(`[AUTO-CLEAR] Room was empty, clearing old whiteboard data`);
-          roomRef.child('whiteboard/strokes').remove().then(() => {
-            console.log(`[AUTO-CLEAR] Old whiteboard data cleared successfully`);
-          }).catch(err => {
-            console.error(`[AUTO-CLEAR] Error clearing old data:`, err);
-          });
-        }
-      });
-      
-      // Обновляем список комнат после входа
-      // Используем небольшую задержку, чтобы дать Firebase время обновить данные
-      setTimeout(() => {
-        // Слушатель должен обновить автоматически, но на всякий случай вызываем явно
-        // Используем force = false, чтобы не создавать дубликаты логов
-        loadRoomsList(false).catch(err => console.error('Ошибка при обновлении списка комнат:', err));
-      }, 300);
-
-      // Счетчик участников
-      roomRef.child("users").once("value").then(snap => {
-        const count = snap.numChildren();
-        ui.updateUsersCount(count);
-        previousUsersCount = count;
-      });
-
-      setupListeners();
-
-      // Создаем соединения с существующими участниками
-      usersSnap.forEach(child => {
-        const otherId = child.key;
-        if (otherId !== myId) {
-          webrtc.createPeer(otherId, true);
-        }
-      });
-
-      playNotificationSound('join');
-
-    } catch (err) {
-      console.error(err);
-      ui.showToast("Ошибка при присоединении к комнате");
-    } finally {
-      joinLock = false;
-    }
-  }
-
-  /**
    * Автоматическое переподключение к комнате после потери соединения
    */
   async function attemptReconnect() {
@@ -2340,6 +2068,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Переинициализируем слушатели
       setupListeners();
       
+      // 🔧 FIX: Запускаем детектор речи после переподключения
+      if (speechDetector && typeof speechDetector.startDetection === 'function') {
+        speechDetector.startDetection();
+        console.log('✅ Детектор речи запущен после переподключения');
+      }
+      
       console.log('✅ Переподключение успешно');
       ui.showToast('Соединение восстановлено', 2000);
       reconnectAttempts = 0; // Сбрасываем счетчик при успехе
@@ -2364,6 +2098,107 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   /**
+   * Запускает heartbeat для поддержания активности пользователя
+   */
+  function startHeartbeat() {
+    // Останавливаем предыдущий heartbeat если есть
+    stopHeartbeat();
+    
+    // Обновляем timestamp каждые 25 секунд (чаще для надежности)
+    heartbeatInterval = setInterval(() => {
+      if (myUserRef && joined) {
+        // Обновляем lastActive для поддержания активности соединения
+        myUserRef.child('lastActive').set(firebase.database.ServerValue.TIMESTAMP)
+          .then(() => {
+            // Дополнительно обновляем onDisconnect handler для продления времени жизни
+            myUserRef.onDisconnect().remove();
+            console.log('🔄 Heartbeat: соединение обновлено');
+          })
+          .catch(err => {
+            console.warn('⚠️ Heartbeat error:', err);
+            // Если heartbeat не работает, возможно соединение потеряно
+            // Проверяем статус соединения
+            db.ref('.info/connected').once('value').then(snap => {
+              if (!snap.val()) {
+                console.warn('⚠️ Firebase соединение потеряно, попытка переподключения...');
+                // Соединение потеряно, но Firebase должен автоматически переподключиться
+              }
+            });
+          });
+      }
+    }, 25000); // 25 секунд (чаще чем 30 для большей надежности)
+    
+    console.log('✅ Heartbeat started (interval: 25s)');
+  }
+  
+  /**
+   * Останавливает heartbeat
+   */
+  function stopHeartbeat() {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+      console.log('⏹️ Heartbeat stopped');
+    }
+  }
+
+  /**
+   * Запускает проверку присутствия пользователя в комнате
+   * Проверяет каждые 2 минуты, что пользователь все еще в комнате
+   */
+  function startPresenceCheck() {
+    // Останавливаем предыдущую проверку если есть
+    stopPresenceCheck();
+    
+    // Проверяем присутствие каждые 2 минуты
+    presenceCheckInterval = setInterval(async () => {
+      if (myUserRef && myId && joined && roomRef) {
+        try {
+          // Проверяем, существует ли наша запись в комнате
+          const snapshot = await myUserRef.once('value');
+          if (!snapshot.exists()) {
+            console.warn('⚠️ Пользователь не найден в комнате, восстанавливаем...');
+            // Пытаемся восстановить запись
+            const currentUser = authManager.getCurrentUser();
+            const firebaseUserId = currentUser ? currentUser.uid : null;
+            const speakerMuted = webrtc.speakerMuted || false;
+            
+            // Создаем новую запись с тем же ID
+            await roomRef.child("users").child(myId).set({
+              nick: myNick,
+              mute: muted,
+              speakerMuted: speakerMuted,
+              userId: firebaseUserId,
+              lastActive: firebase.database.ServerValue.TIMESTAMP
+            });
+            
+            // Восстанавливаем onDisconnect
+            myUserRef.onDisconnect().remove();
+            
+            console.log('✅ Запись пользователя восстановлена');
+            ui.showToast('Соединение восстановлено', 2000);
+          }
+        } catch (err) {
+          console.error('❌ Ошибка при проверке присутствия:', err);
+        }
+      }
+    }, 120000); // 2 минуты
+    
+    console.log('✅ Presence check started (interval: 2min)');
+  }
+
+  /**
+   * Останавливает проверку присутствия
+   */
+  function stopPresenceCheck() {
+    if (presenceCheckInterval) {
+      clearInterval(presenceCheckInterval);
+      presenceCheckInterval = null;
+      console.log('⏹️ Presence check stopped');
+    }
+  }
+
+  /**
    * Покидает комнату
    */
   async function leaveRoom() {
@@ -2372,6 +2207,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Устанавливаем флаг намеренного выхода СРАЗУ, до любых других операций
     intentionalLeave = true;
     reconnectAttempts = 0; // Сбрасываем счетчик попыток
+    
+    // Останавливаем heartbeat и проверку присутствия
+    stopHeartbeat();
+    stopPresenceCheck();
     
     // Останавливаем мониторинг подключения СРАЗУ
     if (connectionManager) {
@@ -2402,6 +2241,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const wasJoined = joined;
     // Устанавливаем флаг намеренного выхода СРАЗУ, до любых операций
     intentionalLeave = true;
+    
+    // Останавливаем heartbeat и проверку присутствия
+    stopHeartbeat();
+    stopPresenceCheck();
     
     // Сохраняем ссылки перед очисткой
     const currentRoomRef = roomRef;
@@ -2446,11 +2289,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     
     // Отключаем слушатели ПЕРЕД установкой joined = false
-    // чтобы избежать срабатывания переподключения
+    // 🔧 FIX: Отключаем слушатели явно с сохраненными ссылками
     if (currentRoomRef) {
-      currentRoomRef.child("users").off();
-      currentRoomRef.child("signals").off();
-      currentRoomRef.child("messages").off();
+      if (currentRoomRef._customListeners) {
+        if (currentRoomRef._customListeners.users) {
+          currentRoomRef.child("users").off("value", currentRoomRef._customListeners.users);
+        }
+        if (currentRoomRef._customListeners.signals) {
+          currentRoomRef.child("signals").off("child_added", currentRoomRef._customListeners.signals);
+        }
+        if (currentRoomRef._customListeners.messages) {
+          currentRoomRef.child("messages").off("child_added", currentRoomRef._customListeners.messages);
+        }
+        currentRoomRef._customListeners = {};
+      } else {
+        // Fallback: отключаем все слушатели
+        currentRoomRef.child("users").off();
+        currentRoomRef.child("signals").off();
+        currentRoomRef.child("messages").off();
+      }
     }
     
     // Отменяем все активные попытки переподключения
@@ -2507,13 +2364,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Скрываем информацию о комнате
     ui.hideRoomInfo();
     
+    // 🔧 FIX: Локально обновляем счетчик на карточке СРАЗУ при выходе
+    if (currentRoomId) {
+      const roomCard = document.querySelector(`.room-card[data-room-id="${currentRoomId}"]`);
+      if (roomCard) {
+        const usersCountEl = roomCard.querySelector('.room-card-users');
+        if (usersCountEl) {
+          // Получаем текущее значение и уменьшаем на 1 (вы вышли)
+          const currentCount = parseInt(usersCountEl.textContent) || 0;
+          const newCount = Math.max(0, currentCount - 1);
+          usersCountEl.textContent = newCount;
+          console.log(`✅ Счетчик локально обновлен при выходе: ${currentCount} → ${newCount}`);
+        }
+      }
+    }
+    
     // Сбрасываем текущую комнату
     currentRoomId = null;
 
     // Никнейм больше не изменяется пользователем
     
-    // Обновляем список комнат
-    await loadRoomsList();
+    // Обновляем список комнат с задержкой, чтобы Firebase успел обновить данные
+    setTimeout(() => {
+      loadRoomsList(false).catch(err => console.error('Ошибка при обновлении списка комнат:', err));
+    }, 500);
 
     // Логируем выход из комнаты
     if (wasJoined && currentRoomId) {
@@ -2582,13 +2456,28 @@ document.addEventListener("DOMContentLoaded", async () => {
   function setupListeners() {
     if (!roomRef) return;
 
-    // Отключаем старые слушатели перед созданием новых
-    roomRef.child("users").off();
-    roomRef.child("signals").off();
-    roomRef.child("messages").off();
+    // 🔧 FIX: Отключаем старые слушатели перед созданием новых
+    // Если есть сохраненные слушатели, отключаем их явно
+    if (roomRef._customListeners) {
+      if (roomRef._customListeners.users) {
+        roomRef.child("users").off("value", roomRef._customListeners.users);
+      }
+      if (roomRef._customListeners.signals) {
+        roomRef.child("signals").off("child_added", roomRef._customListeners.signals);
+      }
+      if (roomRef._customListeners.messages) {
+        roomRef.child("messages").off("child_added", roomRef._customListeners.messages);
+      }
+      roomRef._customListeners = {};
+    } else {
+      // Fallback: отключаем все слушатели
+      roomRef.child("users").off();
+      roomRef.child("signals").off();
+      roomRef.child("messages").off();
+    }
 
-    // Слушатель пользователей с debounce для предотвращения лагов
-    roomRef.child("users").on("value", snap => {
+    // 🔧 FIX: Сохраняем ссылки на слушатели для последующей очистки
+    const usersListener = snap => {
       // Debounce для предотвращения множественных обновлений
       if (usersUpdateTimeout) {
         clearTimeout(usersUpdateTimeout);
@@ -2598,20 +2487,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         const users = snap.val() || {};
         const currentUsersCount = Object.keys(users).length;
 
-      // Обновляем счетчик участников
-      if (joined) {
-        ui.updateUsersCount(currentUsersCount);
-      }
-
-      // Обновляем список комнат при изменении количества участников
-      // Это обновит количество участников в карточке комнаты
-      if (joined && previousUsersCount !== currentUsersCount) {
-        // Список комнат обновляется автоматически через слушатель комнат
-        // Не вызываем loadRoomsList здесь, чтобы избежать дублирования
-        // Слушатель комнат автоматически обновит список при изменении количества пользователей
-      }
-
-      // Звуки при изменении количества участников
+      // Обновляем счетчик участников в шапке
+      ui.updateUsersCount(currentUsersCount);
+      
+      // Звуки при изменении количества участников (только если уже в комнате)
       if (joined && previousUsersCount > 0 && previousUsersCount !== currentUsersCount) {
         const isMeInRoom = myId && users[myId];
         if (isMeInRoom) {
@@ -2621,62 +2500,81 @@ document.addEventListener("DOMContentLoaded", async () => {
             playNotificationSound('leave');
           }
         }
-        previousUsersCount = currentUsersCount;
       }
+      
+      previousUsersCount = currentUsersCount;
 
       // Обновляем состояния muted в детекторе речи
       speechDetector.updateUserMutedStates(users);
 
       usersManager.updateUsersList(users, (userId, volume) => {
         webrtc.setUserVolume(userId, volume);
-      }, myId); // Передаем myId, чтобы скрыть кнопку "Добавить в друзья" для самого себя
+      }, myId);
 
+      // Комната больше не удаляется автоматически при выходе всех пользователей
       if (joined) {
         const count = Object.keys(users).length;
-        ui.updateUsersCount(count);
-        previousUsersCount = count;
-
-        // Комната больше не удаляется автоматически при выходе всех пользователей
         if (count === 0 && roomRef) {
           if (chat) {
-          chat.clear();
+            chat.clear();
           }
           usersManager.clear();
         }
       }
 
-        // Проверка на удаление пользователя администратором
-        // Показываем уведомление только если это не намеренный выход пользователя
-        if (joined && myUserRef && myId && !users[myId] && !intentionalLeave) {
-          console.log('Пользователь удален из комнаты администратором');
-          // Устанавливаем intentionalLeave перед вызовом, чтобы предотвратить повторные вызовы
-          intentionalLeave = true;
-          // Вызываем forceLeaveRoom с кастомным сообщением
-          forceLeaveRoom(true, "Вы были выкинуты администратором!").catch(error => {
-            console.error('Ошибка при выходе из комнаты после удаления администратором:', error);
-          });
-        }
+      // Проверка на удаление пользователя администратором
+      // Показываем уведомление только если это не намеренный выход пользователя
+      if (joined && myUserRef && myId && !users[myId] && !intentionalLeave) {
+        console.log('Пользователь удален из комнаты администратором');
+        // Устанавливаем intentionalLeave перед вызовом, чтобы предотвратить повторные вызовы
+        intentionalLeave = true;
+        // Вызываем forceLeaveRoom с кастомным сообщением
+        forceLeaveRoom(true, "Вы были выкинуты администратором!").catch(error => {
+          console.error('Ошибка при выходе из комнаты после удаления администратором:', error);
+        });
+      }
+        
+        usersUpdateTimeout = null;
       }, 300); // Debounce 300ms для предотвращения лагов
-    });
+    };
 
     // Слушатель сигналов WebRTC
-    roomRef.child("signals").on("child_added", snap => {
+    const signalsListener = snap => {
       const data = snap.val();
       if (!data || data.to !== myId) return;
       webrtc.handleSignal(data);
       snap.ref.remove().catch(() => {});
-    });
+    };
 
     // Слушатель сообщений
-    roomRef.child("messages").on("child_added", snap => {
+    const messagesListener = snap => {
       const message = snap.val();
+      console.log('🔔 Firebase: Получено сообщение из базы:', {
+        hasMessage: !!message,
+        hasFile: !!(message && message.file),
+        messageKeys: message ? Object.keys(message) : [],
+        fullMessage: message
+      });
       if (message && chat) {
         // displayMessage теперь асинхронная
         chat.displayMessage(message).catch(error => {
           console.error('Ошибка при отображении сообщения:', error);
         });
       }
-    });
+    };
+
+    // 🔧 FIX: Регистрируем слушатели
+    roomRef.child("users").on("value", usersListener);
+    roomRef.child("signals").on("child_added", signalsListener);
+    roomRef.child("messages").on("child_added", messagesListener);
+
+    // 🔧 FIX: Сохраняем ссылки на слушатели для очистки
+    if (!roomRef._customListeners) {
+      roomRef._customListeners = {};
+    }
+    roomRef._customListeners.users = usersListener;
+    roomRef._customListeners.signals = signalsListener;
+    roomRef._customListeners.messages = messagesListener;
   }
 
   // Обработчики кнопок в title bar
@@ -2707,7 +2605,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   // }
 
   if (ui.elements.createRoomBtn) {
-    ui.elements.createRoomBtn.addEventListener("click", showCreateRoomModal);
+    ui.elements.createRoomBtn.addEventListener("click", () => {
+      if (roomsManager) {
+        roomsManager.showCreateModal();
+      } else {
+        console.error('❌ RoomsManager не инициализирован');
+      }
+    });
   }
 
   // Обработчики модального окна создания комнаты
@@ -2730,18 +2634,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Создание комнаты
   if (ui.elements.createRoomSubmitBtn && ui.elements.roomNameInput && ui.elements.roomIdDisplayInput) {
     ui.elements.createRoomSubmitBtn.addEventListener('click', async () => {
-      const roomId = ui.elements.roomIdDisplayInput.value.trim();
-      const roomName = ui.elements.roomNameInput.value.trim();
-      
-      if (!roomName) {
-        if (ui.elements.createRoomError) {
-          ui.elements.createRoomError.textContent = 'Введите название комнаты';
-          ui.elements.createRoomError.style.display = 'block';
-        }
-        return;
+      if (roomsManager) {
+        const roomId = ui.elements.roomIdDisplayInput.value.trim();
+        const roomName = ui.elements.roomNameInput.value.trim();
+        await roomsManager.createRoom(roomId, roomName);
+      } else {
+        console.error('❌ RoomsManager не инициализирован');
       }
-
-      await createRoomWithName(roomId, roomName);
     });
   }
 
@@ -2766,16 +2665,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Кнопка поиска комнаты
   if (ui.elements.findRoomBtn) {
     ui.elements.findRoomBtn.addEventListener("click", () => {
-      if (ui.elements.findRoomModal) {
-        ui.elements.findRoomModal.classList.add('show');
-        if (ui.elements.roomIdInput) {
-          ui.elements.roomIdInput.value = '';
-          ui.elements.roomIdInput.focus();
-        }
-        if (ui.elements.findRoomError) {
-          ui.elements.findRoomError.textContent = '';
-          ui.elements.findRoomError.style.display = 'none';
-        }
+      if (roomsManager) {
+        roomsManager.showFindModal();
+      } else {
+        console.error('❌ RoomsManager не инициализирован');
       }
     });
   }
@@ -2852,30 +2745,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Поиск и вход в комнату
   if (ui.elements.findRoomSubmitBtn && ui.elements.roomIdInput) {
     ui.elements.findRoomSubmitBtn.addEventListener('click', async () => {
-      const roomId = ui.elements.roomIdInput.value.trim();
-      
-      if (!roomId) {
-        if (ui.elements.findRoomError) {
-          ui.elements.findRoomError.textContent = 'Введите ID комнаты';
-          ui.elements.findRoomError.style.display = 'block';
-        }
-        return;
-      }
-
-      try {
+      if (roomsManager) {
+        const roomId = ui.elements.roomIdInput.value.trim();
+        
         // Закрываем модальное окно
         if (ui.elements.findRoomModal) {
           ui.elements.findRoomModal.classList.remove('show');
         }
-
+        
         // Входим в комнату
-        await findAndJoinRoom(roomId);
-      } catch (error) {
-        console.error('Ошибка при поиске комнаты:', error);
-        if (ui.elements.findRoomError) {
-          ui.elements.findRoomError.textContent = 'Ошибка при подключении к комнате';
-          ui.elements.findRoomError.style.display = 'block';
-        }
+        await roomsManager.joinRoom(roomId);
+      } else {
+        console.error('❌ RoomsManager не инициализирован');
       }
     });
   }
@@ -2901,670 +2782,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Функция загрузки списка комнат
   // Переменные currentRoomId и roomsListener объявлены выше
 
-  // 🚀 ОПТИМИЗИРОВАННАЯ функция загрузки списка комнат с кэшированием
-  async function loadRoomsList(force = false) {
-    try {
-      console.log('=== НАЧАЛО ЗАГРУЗКИ КОМНАТ ===');
-      
-      if (!db) {
-        console.error('❌ База данных не инициализирована!');
-        throw new Error('База данных не инициализирована');
-      }
-      
-      const currentUser = authManager?.getCurrentUser();
-      if (!currentUser) {
-        console.error('❌ Пользователь не авторизован!');
-        throw new Error('Пользователь не авторизован');
-      }
-      
-      console.log('✅ Пользователь авторизован:', currentUser.uid);
-      
-      // 🚀 ОПТИМИЗАЦИЯ: Используем кэш, если force=false
-      let allRooms;
-      if (force) {
-        console.log('🔄 Принудительная загрузка (force=true), игнорируем кэш');
-        roomsCache.invalidate();
-      }
-      
-      // Загружаем данные через кэш
-      allRooms = await roomsCache.get(async () => {
-        console.log('📡 Запрос к Firebase: db.ref("rooms").once("value")...');
-        const snapshot = await db.ref("rooms").once('value');
-        return snapshot.val() || {};
-      });
-      
-      const allRoomsCount = Object.keys(allRooms).length;
-      
-      console.log(`✅ Получено комнат из Firebase: ${allRoomsCount}`);
-      
-      // Фильтруем комнаты: показываем только те, где пользователь создатель ИЛИ участник
-      const filteredRooms = {};
-      const currentUserId = currentUser.uid;
-      
-      Object.entries(allRooms).forEach(([roomId, roomData]) => {
-        const isCreator = roomData?.creatorId === currentUserId;
-        
-        // Проверяем, является ли пользователь участником комнаты
-        let isParticipant = false;
-        if (roomData?.users) {
-          const users = roomData.users;
-          isParticipant = Object.values(users).some(user => user.userId === currentUserId);
-        }
-        
-        // Показываем комнату, если пользователь создатель или участник
-        if (isCreator || isParticipant) {
-          filteredRooms[roomId] = roomData;
-          console.log(`  ✅ ${roomId}: "${roomData?.name || 'БЕЗ ИМЕНИ'}" (создатель: ${isCreator ? 'ДА' : 'НЕТ'}, участник: ${isParticipant ? 'ДА' : 'НЕТ'})`);
-        } else {
-          console.log(`  ❌ ${roomId}: "${roomData?.name || 'БЕЗ ИМЕНИ'}" - пропущена (пользователь не создатель и не участник)`);
-        }
-      });
-      
-      const rooms = filteredRooms;
-      const roomsCount = Object.keys(rooms).length;
-      
-      console.log(`📊 После фильтрации: ${roomsCount} комнат из ${allRoomsCount}`);
-      
-      if (roomsCount === 0 && allRoomsCount > 0) {
-        console.log('⚠️ После фильтрации комнаты не найдены - пользователь не является создателем или участником ни одной комнаты');
-      }
-      
-      // Логируем
-      if (force) {
-        await logger.logRoom('LOAD', 'Загрузка списка комнат при входе в приложение', {
-          userId: currentUser.uid,
-          userEmail: currentUser.email,
-          allRoomsCount: allRoomsCount,
-          filteredRoomsCount: roomsCount,
-          rooms: Object.keys(rooms).map(roomId => ({
-            roomId: roomId,
-            name: rooms[roomId]?.name,
-            creatorId: rooms[roomId]?.creatorId,
-            usersCount: rooms[roomId]?.users ? Object.keys(rooms[roomId].users).length : 0
-          }))
-        }).catch(() => {});
-      }
-      
-      // Инициализируем UI элементы ПЕРЕД рендерингом
-      if (ui.initElements && typeof ui.initElements === 'function') {
-        ui.initElements();
-      }
-      
-      // Убеждаемся, что элементы существуют
-      let roomsListEl = ui.elements?.roomsList || document.getElementById('roomsList') || document.querySelector('.rooms-list');
-      const roomsEmptyEl = ui.elements?.roomsEmpty || document.getElementById('roomsEmpty') || document.querySelector('.rooms-empty');
-      
-      // Если элемент не найден, пробуем еще раз
-      if (!roomsListEl) {
-        console.warn('⚠️ Элемент roomsList не найден сразу, ждем 100ms...');
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Переинициализируем элементы
-        if (ui.initElements && typeof ui.initElements === 'function') {
-          ui.initElements();
-        }
-        
-        roomsListEl = ui.elements?.roomsList || document.getElementById('roomsList') || document.querySelector('.rooms-list');
-      }
-      
-      if (!roomsListEl) {
-        console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: Элемент roomsList не найден!');
-        console.error('Попытка найти элемент через DOM...');
-        // Последняя попытка через 500ms
-        setTimeout(() => {
-          const retryEl = document.getElementById('roomsList') || document.querySelector('.rooms-list');
-          if (retryEl) {
-            console.log('✅ Элемент найден при повторной попытке');
-            if (!ui.elements) ui.elements = {};
-            ui.elements.roomsList = retryEl;
-            renderRoomsList(rooms);
-          } else {
-            console.error('❌ Элемент все еще не найден! Проверьте HTML структуру.');
-          }
-        }, 500);
-        return;
-      }
-      
-      // ОТОБРАЖАЕМ КОМНАТЫ НЕМЕДЛЕННО
-      console.log(`✅ Отображение ${roomsCount} комнат...`);
-      console.log('🔵 Данные комнат перед рендерингом:', JSON.stringify(rooms, null, 2));
-      
-      // Принудительно скрываем пустое состояние перед рендерингом
-      if (roomsCount > 0 && roomsEmptyEl) {
-        console.log('🔵 Скрываем пустое состояние перед рендерингом');
-        roomsEmptyEl.style.display = 'none';
-      }
-      
-      // Рендерим комнаты
-      renderRoomsList(rooms);
-      
-      // Проверяем результат через небольшую задержку
-      setTimeout(() => {
-        const renderedCount = roomsListEl ? roomsListEl.children.length : 0;
-        console.log(`🔵 Проверка после рендеринга: отрендерено ${renderedCount} комнат из ${roomsCount}`);
-        
-        if (renderedCount === 0 && roomsCount > 0) {
-          console.error('❌ ПРОБЛЕМА: Комнаты не отрендерились! Повторная попытка через 300ms...');
-          // Принудительно скрываем пустое состояние
-          if (roomsEmptyEl) {
-            roomsEmptyEl.style.display = 'none';
-          }
-          // Переинициализируем элементы перед повторным рендерингом
-          if (ui.initElements && typeof ui.initElements === 'function') {
-            ui.initElements();
-          }
-          setTimeout(() => {
-            renderRoomsList(rooms);
-            const retryRenderedCount = roomsListEl ? roomsListEl.children.length : 0;
-            console.log(`🔵 Повторная проверка: отрендерено ${retryRenderedCount} комнат`);
-          }, 300);
-        } else if (renderedCount > 0) {
-          console.log(`✅ Успешно отрендерено ${renderedCount} комнат!`);
-          // Убеждаемся, что пустое состояние скрыто
-          if (roomsEmptyEl) {
-            roomsEmptyEl.style.display = 'none';
-          }
-        }
-      }, 300);
-      
-      console.log('=== ЗАГРУЗКА КОМНАТ ЗАВЕРШЕНА ===');
-      
-    } catch (error) {
-      console.error('❌ ОШИБКА при загрузке комнат:', error);
-      console.error('Детали:', error.message, error.stack);
-      renderRoomsList({});
-      throw error; // Пробрасываем ошибку для обработчика кнопки
-    }
-  }
-  
-  // Старый механизм автоматических кликов удален - теперь используем прямой вызов loadRoomsList()
-
-  function renderRoomsList(rooms) {
-    const roomsCount = Object.keys(rooms || {}).length;
-    console.log('🔵 renderRoomsList вызвана, комнат:', roomsCount);
-    console.log('🔵 Данные комнат для рендеринга:', rooms);
-    
-    // Принудительная инициализация элементов UI перед использованием
-    if (ui.initElements && typeof ui.initElements === 'function') {
-      console.log('🔵 Инициализируем элементы UI перед рендерингом...');
-      ui.initElements();
-    }
-    
-    if (!ui.elements || !ui.elements.roomsList || !ui.elements.roomsEmpty) {
-      console.warn('⚠️ Элементы списка комнат не найдены:', {
-        uiElements: !!ui.elements,
-        roomsList: !!ui.elements?.roomsList,
-        roomsEmpty: !!ui.elements?.roomsEmpty
-      });
-      
-      // Пытаемся найти элементы напрямую
-      const roomsListDirect = document.getElementById('roomsList') || document.querySelector('.rooms-list');
-      const roomsEmptyDirect = document.getElementById('roomsEmpty') || document.querySelector('.rooms-empty');
-      
-      if (roomsListDirect && roomsEmptyDirect) {
-        console.log('✅ Элементы найдены напрямую через DOM, используем их');
-        if (!ui.elements) ui.elements = {};
-        ui.elements.roomsList = roomsListDirect;
-        ui.elements.roomsEmpty = roomsEmptyDirect;
-      } else {
-        console.error('❌ Элементы не найдены даже напрямую, повторная попытка через 200ms...');
-        // Повторная попытка через небольшую задержку
-        setTimeout(() => {
-          if (ui.initElements) {
-            ui.initElements();
-          }
-          const retryRoomsList = document.getElementById('roomsList') || document.querySelector('.rooms-list');
-          const retryRoomsEmpty = document.getElementById('roomsEmpty') || document.querySelector('.rooms-empty');
-          if (retryRoomsList && retryRoomsEmpty) {
-            if (!ui.elements) ui.elements = {};
-            ui.elements.roomsList = retryRoomsList;
-            ui.elements.roomsEmpty = retryRoomsEmpty;
-            renderRoomsList(rooms);
-          } else {
-            console.error('❌ Элементы все еще не найдены после повторной попытки');
-          }
-        }, 200);
-        return;
-      }
-    }
-    
-    console.log('Элементы UI найдены, начинаем рендеринг списка комнат');
-
-    const roomsArray = Object.entries(rooms || {}).map(([roomId, roomData]) => {
-      const usersCount = roomData.users ? Object.keys(roomData.users).length : 0;
-      console.log(`Комната ${roomId}: ${usersCount} участников`);
-      return {
-        id: roomId,
-        name: roomData.name || 'Без названия',
-        creatorId: roomData.creatorId,
-        usersCount: usersCount
-      };
-    });
-
-    console.log('Массив комнат для отображения:', roomsArray.length);
-
-    if (roomsArray.length === 0) {
-      console.log('Нет комнат для отображения, показываем пустое состояние');
-      ui.elements.roomsList.innerHTML = '';
-      // Показываем пустое состояние по центру контейнера
-      if (ui.elements.roomsEmpty) {
-        ui.elements.roomsEmpty.style.display = 'flex';
-      }
-      return;
-    }
-    
-    // 🔧 FIX: Скрываем пустое состояние один раз (было дублирование)
-    if (ui.elements.roomsEmpty) {
-      ui.elements.roomsEmpty.style.display = 'none';
-      console.log('🔵 Пустое состояние скрыто (есть комнаты для отображения)');
-    }
-
-    console.log('Очищаем список и отображаем', roomsArray.length, 'комнат');
-    
-    // Используем DocumentFragment для оптимизации DOM операций
-    const fragment = document.createDocumentFragment();
-
-    let renderedCount = 0;
-    roomsArray.forEach((room, index) => {
-      console.log(`🔵 Рендеринг комнаты ${index + 1}/${roomsArray.length}: ${room.id} (${room.name})`);
-      
-      const roomCard = document.createElement('div');
-      roomCard.className = 'room-card';
-      roomCard.dataset.roomId = room.id;
-      if (currentRoomId === room.id) {
-        roomCard.classList.add('active');
-      }
-
-      roomCard.innerHTML = `
-        <div class="room-card-info">
-          <div class="room-card-name">${escapeHtml(room.name)}</div>
-          <div class="room-card-users">${room.usersCount}</div>
-        </div>
-      `;
-
-      // Обработчик клика для входа в комнату
-      roomCard.addEventListener('click', async (e) => {
-        if (e.button === 0) { // Левый клик
-          if (room.id !== currentRoomId) {
-            await findAndJoinRoom(room.id);
-          }
-        }
-      });
-
-      // Обработчик правого клика для контекстного меню
-      roomCard.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        showRoomContextMenu(e, room.id, room.creatorId);
-      });
-
-      try {
-        fragment.appendChild(roomCard);
-        renderedCount++;
-        console.log(`✅ Комната ${room.id} добавлена в fragment (${renderedCount}/${roomsArray.length})`);
-      } catch (appendError) {
-        console.error(`❌ Ошибка при добавлении комнаты ${room.id} в fragment:`, appendError);
-      }
-    });
-    
-    // Добавляем все комнаты одной операцией для оптимизации DOM
-    ui.elements.roomsList.innerHTML = '';
-    ui.elements.roomsList.appendChild(fragment);
-    
-    console.log('✅ Список комнат отрендерен, добавлено карточек:', renderedCount, 'из', roomsArray.length);
-    console.log('🔵 Элемент roomsList содержит детей:', ui.elements.roomsList.children.length);
-    console.log('🔵 Элемент roomsList видим:', {
-      display: window.getComputedStyle(ui.elements.roomsList).display,
-      visibility: window.getComputedStyle(ui.elements.roomsList).visibility,
-      opacity: window.getComputedStyle(ui.elements.roomsList).opacity,
-      height: window.getComputedStyle(ui.elements.roomsList).height,
-      width: window.getComputedStyle(ui.elements.roomsList).width
-    });
-    
-    // Финальная проверка: если комнаты не отрендерились, попробуем еще раз
-    if (renderedCount === 0 && roomsArray.length > 0) {
-      console.error('❌ КРИТИЧЕСКАЯ ПРОБЛЕМА: Комнаты не отрендерились!');
-      console.error('Попытка повторного рендеринга через 300ms...');
-      setTimeout(() => {
-        console.log('🔄 Повторный рендеринг списка комнат...');
-        renderRoomsList(rooms);
-      }, 300);
-    }
-    
-    // Убеждаемся, что контейнер комнат виден
-    const roomsContent = document.getElementById('roomsContent');
-    if (roomsContent) {
-      const computedStyle = window.getComputedStyle(roomsContent);
-      console.log('roomsContent найден, стили:', {
-        display: computedStyle.display,
-        visibility: computedStyle.visibility,
-        opacity: computedStyle.opacity,
-        hasActiveClass: roomsContent.classList.contains('active')
-      });
-      
-      // НЕ переключаем вкладки автоматически - пользователь может быть на вкладке "Друзья"
-      // Список комнат обновляется в фоне, но вкладка остается той, которую выбрал пользователь
-    } else {
-      console.warn('⚠️ roomsContent элемент не найден!');
-    }
-  }
-
-  function showRoomContextMenu(e, roomId, creatorId) {
-    if (!ui.elements.roomContextMenu) {
-      console.warn('roomContextMenu элемент не найден');
-      return;
-    }
-
-    const currentUser = authManager.getCurrentUser();
-    if (!currentUser) {
-      console.warn('Пользователь не авторизован');
-      return;
-    }
-
-    console.log('showRoomContextMenu вызвана:', {
-      roomId,
-      creatorId,
-      currentUserUid: currentUser.uid,
-      joined,
-      currentRoomId
-    });
-
-    // Показываем кнопку удаления только для создателя
-    if (ui.elements.roomContextDelete) {
-      if (creatorId === currentUser.uid) {
-        ui.elements.roomContextDelete.style.display = 'block';
-        console.log('Кнопка удаления показана (создатель комнаты)');
-      } else {
-        ui.elements.roomContextDelete.style.display = 'none';
-        console.log('Кнопка удаления скрыта (не создатель)');
-      }
-    } else {
-      console.warn('roomContextDelete элемент не найден');
-    }
-
-    // Показываем кнопку выхода только если пользователь в этой комнате
-    if (ui.elements.roomContextLeave) {
-      console.log('Проверка кнопки выхода:', {
-        joined: joined,
-        currentRoomId: currentRoomId,
-        roomId: roomId,
-        условие: joined && currentRoomId && currentRoomId === roomId
-      });
-      
-      if (joined && currentRoomId && currentRoomId === roomId) {
-        ui.elements.roomContextLeave.style.display = 'block';
-        console.log('✅ Кнопка выхода ПОКАЗАНА для комнаты:', roomId);
-      } else {
-        ui.elements.roomContextLeave.style.display = 'none';
-        console.log('❌ Кнопка выхода СКРЫТА:', {
-          причина: !joined ? 'не подключен' : 
-                   !currentRoomId ? 'нет currentRoomId' : 
-                   currentRoomId !== roomId ? 'не эта комната' : 'неизвестно'
-        });
-      }
-    } else {
-      console.error('❌ roomContextLeave элемент НЕ НАЙДЕН в DOM!');
-    }
-
-    // Позиционируем меню
-    ui.elements.roomContextMenu.style.display = 'block';
-    ui.elements.roomContextMenu.style.left = e.pageX + 'px';
-    ui.elements.roomContextMenu.style.top = e.pageY + 'px';
-    ui.elements.roomContextMenu.dataset.roomId = roomId;
-    console.log('Контекстное меню показано в позиции:', { x: e.pageX, y: e.pageY });
-
-    // Закрываем меню при клике вне его
-    const closeMenu = (event) => {
-      if (ui.elements.roomContextMenu && !ui.elements.roomContextMenu.contains(event.target)) {
-        ui.elements.roomContextMenu.style.display = 'none';
-        document.removeEventListener('click', closeMenu);
-      }
-    };
-    setTimeout(() => {
-      document.addEventListener('click', closeMenu);
-    }, 0);
-  }
+  // Старые функции loadRoomsList, renderRoomsList, showRoomContextMenu, startRoomsListener, stopRoomsListener
+  // удалены - теперь используется RoomsManager
 
   // escapeHtml перенесена в utils/security.js
-
-  // 🚀 ОПТИМИЗИРОВАННЫЙ слушатель комнат с менеджером подписок
-  function startRoomsListener() {
-    if (!db) {
-      console.error('База данных не инициализирована для слушателя комнат');
-      return;
-    }
-    
-    // Проверяем, что пользователь авторизован перед установкой слушателя
-    const currentUser = authManager?.getCurrentUser();
-    if (!currentUser) {
-      console.warn('⚠️ Пользователь не авторизован, слушатель комнат не запущен');
-      return;
-    }
-    
-    // 🚀 ОПТИМИЗАЦИЯ: Используем менеджер слушателей для предотвращения дубликатов
-    if (listenersManager.has('rooms')) {
-      console.warn('⚠️ Слушатель комнат уже зарегистрирован, пропускаем');
-      return;
-    }
-
-    console.log('🔵 Запуск слушателя комнат в реальном времени');
-    
-    const roomsRef = db.ref("rooms");
-    let isFirstListenerEvent = true; // Флаг первого события слушателя
-    
-    // Debounce для обновления списка (не чаще раза в секунду)
-    const scheduleUpdate = (roomId = null, roomData = null, action = 'update') => {
-      // 🚀 ОПТИМИЗАЦИЯ: Обновляем кэш напрямую для мгновенного отклика
-      if (roomId && action === 'remove') {
-        roomsCache.updateRoom(roomId, null);
-      } else if (roomId && roomData) {
-        roomsCache.updateRoom(roomId, roomData);
-      } else {
-        // Если нет конкретной комнаты, инвалидируем весь кэш
-        roomsCache.invalidate();
-      }
-      
-      if (roomsUpdateTimeout) return; // Уже запланировано
-      roomsUpdateTimeout = setTimeout(() => {
-        roomsUpdateTimeout = null;
-        loadRoomsList(); // Перезагружаем список (будет использован кэш)
-      }, 1000); // 1 секунда debounce
-    };
-    
-    // Callback'и для событий
-    const onChildAdded = (snap) => {
-      if (isInitialLoad || (isFirstListenerEvent && roomsListInitialized)) {
-        isFirstListenerEvent = false;
-        return;
-      }
-      isFirstListenerEvent = false;
-      
-      const roomId = snap.key;
-      const roomData = snap.val();
-      console.log('🔵 [LISTENER] Новая комната добавлена:', roomId);
-      scheduleUpdate(roomId, roomData, 'add');
-    };
-    
-    const onChildChanged = (snap) => {
-      if (isInitialLoad) return;
-      const roomId = snap.key;
-      const roomData = snap.val();
-      console.log('🔵 [LISTENER] Комната изменена:', roomId);
-      scheduleUpdate(roomId, roomData, 'change');
-    };
-    
-    const onChildRemoved = (snap) => {
-      if (isInitialLoad) return;
-      const roomId = snap.key;
-      console.log('🔵 [LISTENER] Комната удалена:', roomId);
-      scheduleUpdate(roomId, null, 'remove');
-    };
-    
-    // 🚀 ОПТИМИЗАЦИЯ: Регистрируем все события через менеджер
-    listenersManager.registerMultiple('rooms', roomsRef, [
-      { event: 'child_added', callback: onChildAdded },
-      { event: 'child_changed', callback: onChildChanged },
-      { event: 'child_removed', callback: onChildRemoved }
-    ]);
-    
-    console.log('✅ Слушатели комнат запущены через менеджер');
-  }
-
-  function stopRoomsListener() {
-    // 🚀 ОПТИМИЗАЦИЯ: Используем менеджер для отписки
-    if (listenersManager.has('rooms')) {
-      listenersManager.unregister('rooms');
-      console.log('✅ Слушатель комнат остановлен');
-    }
-  }
-  
-  // АВТОМАТИЧЕСКАЯ ЗАГРУЗКА КОМНАТ ПРИ ИНИЦИАЛИЗАЦИИ ПРИЛОЖЕНИЯ
-  // Вызываем загрузку комнат сразу после определения всех функций
-  // Используем проверку состояния приложения через небольшие интервалы
-  let autoLoadRoomsInterval = null;
-  let autoLoadRoomsAttempts = 0;
-  const MAX_AUTO_LOAD_ATTEMPTS = 30; // 30 попыток = 15 секунд максимум
-  
-  const tryAutoLoadRooms = async () => {
-    autoLoadRoomsAttempts++;
-    
-    // Если комнаты уже загружены, останавливаем попытки
-    if (roomsListInitialized) {
-      console.log('✅ Комнаты уже загружены, останавливаем автоматическую загрузку');
-      if (autoLoadRoomsInterval) {
-        clearInterval(autoLoadRoomsInterval);
-        autoLoadRoomsInterval = null;
-      }
-      return;
-    }
-    
-    // Проверяем, что пользователь авторизован
-    const currentUser = authManager?.getCurrentUser();
-    if (!currentUser) {
-      if (autoLoadRoomsAttempts < MAX_AUTO_LOAD_ATTEMPTS) {
-        // Тихо ждем авторизации без лишних логов
-        return;
-      } else {
-        // Пользователь просто еще не авторизовался - это нормально
-        if (autoLoadRoomsInterval) {
-          clearInterval(autoLoadRoomsInterval);
-          autoLoadRoomsInterval = null;
-        }
-        return;
-      }
-    }
-    
-    // Проверяем, что приложение показано
-    const appContent = document.getElementById('appContent');
-    if (!appContent || appContent.style.display === 'none') {
-      if (autoLoadRoomsAttempts < MAX_AUTO_LOAD_ATTEMPTS) {
-        console.log(`⏳ Ожидание инициализации приложения... (попытка ${autoLoadRoomsAttempts}/${MAX_AUTO_LOAD_ATTEMPTS})`);
-        return;
-      } else {
-        console.warn('⚠️ Приложение не инициализировано после всех попыток, останавливаем автоматическую загрузку');
-        if (autoLoadRoomsInterval) {
-          clearInterval(autoLoadRoomsInterval);
-          autoLoadRoomsInterval = null;
-        }
-        return;
-      }
-    }
-    
-    // Проверяем, что функции определены
-    if (typeof loadRoomsList !== 'function' || typeof startRoomsListener !== 'function') {
-      if (autoLoadRoomsAttempts < MAX_AUTO_LOAD_ATTEMPTS) {
-        console.log(`⏳ Ожидание определения функций загрузки... (попытка ${autoLoadRoomsAttempts}/${MAX_AUTO_LOAD_ATTEMPTS})`);
-        return;
-      } else {
-        console.error('❌ Функции загрузки не определены после всех попыток!');
-        if (autoLoadRoomsInterval) {
-          clearInterval(autoLoadRoomsInterval);
-          autoLoadRoomsInterval = null;
-        }
-        return;
-      }
-    }
-    
-    // Все проверки пройдены, загружаем комнаты
-    console.log('🚀 Автоматическая загрузка комнат при входе в приложение...');
-    
-    // Останавливаем интервал
-    if (autoLoadRoomsInterval) {
-      clearInterval(autoLoadRoomsInterval);
-      autoLoadRoomsInterval = null;
-    }
-    
-    try {
-      // Устанавливаем флаг начальной загрузки ПЕРЕД загрузкой
-      isInitialLoad = true;
-      console.log('🔵 Флаг isInitialLoad установлен в true');
-      
-      // Загружаем комнаты
-      console.log('🔵 Вызов loadRoomsList(true)...');
-      await loadRoomsList(true);
-      console.log('✅ loadRoomsList завершена');
-      
-      // Проверяем, что комнаты действительно отрендерились
-      const roomsListEl = ui.elements?.roomsList || document.getElementById('roomsList');
-      const renderedCount = roomsListEl ? roomsListEl.children.length : 0;
-      console.log(`🔵 Проверка после загрузки: отрендерено ${renderedCount} комнат`);
-      
-      // Ждем немного, чтобы убедиться, что рендеринг завершен
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Еще раз проверяем рендеринг
-      const finalRenderedCount = roomsListEl ? roomsListEl.children.length : 0;
-      console.log(`🔵 Финальная проверка: отрендерено ${finalRenderedCount} комнат`);
-      
-      // Помечаем, что загрузка выполнена ПЕРЕД запуском слушателя
-      // Это предотвратит перезапись данных слушателем
-      roomsListInitialized = true;
-      console.log('✅ roomsListInitialized установлен в true');
-      
-      // Запускаем слушатель для обновлений в реальном времени ТОЛЬКО после загрузки
-      // и после установки флага roomsListInitialized
-      if (!roomsListener) {
-        console.log('🔵 Запуск слушателя комнат после начальной загрузки...');
-        startRoomsListener();
-      }
-      
-      // Через задержку снимаем флаг начальной загрузки
-      // Это позволит слушателю обрабатывать последующие изменения
-      setTimeout(() => {
-        isInitialLoad = false;
-        console.log('✅ Начальная загрузка завершена, слушатель активен (isInitialLoad = false)');
-      }, 2000); // Увеличена задержка до 2 секунд
-      
-      console.log('✅ Комнаты успешно загружены при входе в приложение');
-    } catch (error) {
-      console.error('❌ Ошибка при автоматической загрузке комнат:', error.message || error);
-      if (error.stack) console.error(error.stack);
-      // Запускаем слушатель даже при ошибке
-      try {
-        if (!roomsListener) {
-          startRoomsListener();
-        }
-        isInitialLoad = false;
-        roomsListInitialized = true; // Помечаем, что попытка была
-      } catch (listenerError) {
-        console.error('❌ Ошибка при запуске слушателя:', listenerError.message || listenerError);
-        if (listenerError.stack) console.error(listenerError.stack);
-      }
-    }
-  };
-  
-  // Запускаем проверку сразу и затем каждые 500ms
-  console.log('🔵 Запуск автоматической загрузки комнат...');
-  tryAutoLoadRooms(); // Первая попытка сразу
-  autoLoadRoomsInterval = setInterval(tryAutoLoadRooms, 500); // Затем каждые 500ms
-  
-  // Останавливаем через максимум 15 секунд
-  setTimeout(() => {
-    if (autoLoadRoomsInterval) {
-      clearInterval(autoLoadRoomsInterval);
-      autoLoadRoomsInterval = null;
-    }
-    // Убрано предупреждение - это нормальная ситуация при медленном соединении
-  }, MAX_AUTO_LOAD_ATTEMPTS * 500);
 
   // Обработчики контекстного меню
   if (ui.elements.roomContextLeave) {
@@ -3572,16 +2793,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       e.stopPropagation();
       e.preventDefault();
       
-      const roomId = ui.elements.roomContextMenu?.dataset.roomId;
-      console.log('Кнопка "Выйти из комнаты" нажата, roomId:', roomId, 'currentRoomId:', currentRoomId, 'joined:', joined);
-      
-      // Проверяем, что пользователь находится в этой комнате
-      if (joined && currentRoomId && currentRoomId === roomId) {
-        console.log('Выход из комнаты:', roomId);
-        await leaveRoom();
+      if (roomsManager && roomsManager.joined) {
+        console.log('Выход из комнаты через RoomsManager');
+        await roomsManager.leaveRoom();
       } else {
-        console.log('Пользователь не в этой комнате или не подключен');
-        ui.showToast('Вы не находитесь в этой комнате');
+        console.log('Пользователь не в комнате или RoomsManager не инициализирован');
+        ui.showToast('Вы не находитесь в комнате');
       }
       
       // Закрываем контекстное меню
@@ -3596,31 +2813,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const roomId = ui.elements.roomContextMenu?.dataset.roomId;
       if (!roomId) return;
 
-      const currentUser = authManager.getCurrentUser();
-      if (!currentUser) return;
-
-      // Проверяем, является ли пользователь создателем
-      const isCreator = await isRoomCreator(db, roomId, currentUser.uid);
-      if (!isCreator) {
-        ui.showToast('Только создатель комнаты может её удалить');
-        if (ui.elements.roomContextMenu) {
-          ui.elements.roomContextMenu.style.display = 'none';
-        }
-        return;
-      }
-
-      // Если мы в этой комнате, сначала выходим
-      if (joined && currentRoomId === roomId) {
-        await leaveRoom();
-      }
-
-      try {
-        await deleteRoomById(db, roomId);
-        ui.showToast('Комната удалена');
-        await loadRoomsList();
-      } catch (error) {
-        console.error('Ошибка при удалении комнаты:', error);
-        ui.showToast('Ошибка при удалении комнаты');
+      if (roomsManager) {
+        await roomsManager.deleteRoom(roomId);
+      } else {
+        console.error('❌ RoomsManager не инициализирован');
       }
 
       if (ui.elements.roomContextMenu) {
@@ -3861,7 +3057,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             // 🚀 ОПТИМИЗАЦИЯ: Очищаем все слушатели и кэш перед выходом
             try {
               console.log('🧹 Очистка слушателей и кэша...');
-              stopRoomsListener(); // Останавливаем слушатель комнат
+              if (roomsManager) {
+                roomsManager.cleanup(); // Полная очистка RoomsManager (слушатели + таймеры)
+              }
               listenersManager.unregisterAll(); // Отписываемся от всех слушателей
               roomsCache.clear(); // Очищаем кэш комнат
               console.log('✅ Слушатели и кэш очищены');
@@ -3945,8 +3143,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       
       // 🔧 FIX: Останавливаем слушатели Firebase
-      if (typeof stopRoomsListener === 'function') {
-        stopRoomsListener();
+      if (roomsManager) {
+        roomsManager.cleanup();
       }
       if (typeof listenersManager !== 'undefined' && listenersManager) {
         listenersManager.unregisterAll();
@@ -3957,22 +3155,35 @@ document.addEventListener("DOMContentLoaded", async () => {
         speechDetector.stopDetection();
       }
       
-      // Закрываем все WebRTC соединения
-      if (webrtc) {
-        Object.values(webrtc.peers).forEach(peer => {
-          if (peer && !peer.destroyed) {
-            peer.destroy();
-          }
-        });
-        
-        // Останавливаем локальный стрим
-        if (webrtc.localStream) {
-          webrtc.localStream.getTracks().forEach(track => track.stop());
-        }
+      // 🔧 FIX: Закрываем все WebRTC соединения через cleanup()
+      if (webrtc && typeof webrtc.cleanup === 'function') {
+        webrtc.cleanup();
       }
       
-      // Отключаемся от Firebase
+      // 🔧 FIX: Очищаем FriendsManager
+      if (friendsManager && typeof friendsManager.cleanup === 'function') {
+        friendsManager.cleanup();
+      }
+      
+      // 🔧 FIX: Очищаем ConnectionManager
+      if (connectionManager && typeof connectionManager.cleanup === 'function') {
+        connectionManager.cleanup();
+      }
+      
+      // 🔧 FIX: Отключаемся от Firebase с явной очисткой слушателей
       if (roomRef) {
+        if (roomRef._customListeners) {
+          if (roomRef._customListeners.users) {
+            roomRef.child("users").off("value", roomRef._customListeners.users);
+          }
+          if (roomRef._customListeners.signals) {
+            roomRef.child("signals").off("child_added", roomRef._customListeners.signals);
+          }
+          if (roomRef._customListeners.messages) {
+            roomRef.child("messages").off("child_added", roomRef._customListeners.messages);
+          }
+          roomRef._customListeners = {};
+        }
         roomRef.off();
       }
       
