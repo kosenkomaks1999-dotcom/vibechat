@@ -279,10 +279,10 @@ document.addEventListener("DOMContentLoaded", async () => {
           
           // Создаем callback для входа в комнату
           const joinRoomCallback = async (roomId) => {
-            if (typeof findAndJoinRoom === 'function') {
-              await findAndJoinRoom(roomId);
+            if (roomsManager && typeof roomsManager.joinRoom === 'function') {
+              await roomsManager.joinRoom(roomId);
             } else {
-              console.error('Функция findAndJoinRoom не найдена');
+              console.error('RoomsManager не инициализирован или функция joinRoom не найдена');
             }
           };
           
