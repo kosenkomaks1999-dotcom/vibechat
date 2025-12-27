@@ -154,7 +154,15 @@ export class WebRTCManager {
     const peer = new SimplePeer({ 
       initiator, 
       trickle: true, 
-      stream: streamToSend 
+      stream: streamToSend,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        ]
+      }
     });
     
     let reconnectTimeout = null;
