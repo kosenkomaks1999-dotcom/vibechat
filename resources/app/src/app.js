@@ -2514,6 +2514,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Обновляем состояния muted в детекторе речи
       speechDetector.updateUserMutedStates(users);
 
+      // Создаем P2P соединения с новыми пользователями
+      Object.keys(users).forEach(userId => {
+        if (userId !== myId && !webrtc.peers[userId]) {
+          console.log('🔗 Создаем P2P соединение с пользователем:', userId);
+          webrtc.createPeer(userId, true); // true = инициатор соединения
+        }
+      });
+
+      // Удаляем соединения с пользователями, которые покинули комнату
+      Object.keys(webrtc.peers).forEach(userId => {
+        if (!users[userId]) {
+          console.log('🔌 Закрываем P2P соединение с пользователем:', userId);
+          if (webrtc.peers[userId] && !webrtc.peers[userId].destroyed) {
+            webrtc.peers[userId].destroy();
+          }
+          webrtc.handlePeerClose(userId);
+        }
+      });
+
       usersManager.updateUsersList(users, (userId, volume) => {
         webrtc.setUserVolume(userId, volume);
       }, myId);
