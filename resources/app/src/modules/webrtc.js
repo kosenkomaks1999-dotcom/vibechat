@@ -157,10 +157,13 @@ export class WebRTCManager {
       stream: streamToSend,
       config: {
         iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
+          // Альтернативные STUN серверы
+          { urls: 'stun:stun.stunprotocol.org:3478' },
+          { urls: 'stun:stun.voiparound.com' },
+          { urls: 'stun:stun.voipbuster.com' },
+          { urls: 'stun:openrelay.metered.ca:80' },
+          { urls: 'stun:relay.webwormhole.io' },
+          { urls: 'stun:stun.cloudflare.com:3478' }
         ]
       }
     });
