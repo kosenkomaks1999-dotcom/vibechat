@@ -154,18 +154,7 @@ export class WebRTCManager {
     const peer = new SimplePeer({ 
       initiator, 
       trickle: true, 
-      stream: streamToSend,
-      config: {
-        iceServers: [
-          // Альтернативные STUN серверы
-          { urls: 'stun:stun.stunprotocol.org:3478' },
-          { urls: 'stun:stun.voiparound.com' },
-          { urls: 'stun:stun.voipbuster.com' },
-          { urls: 'stun:openrelay.metered.ca:80' },
-          { urls: 'stun:relay.webwormhole.io' },
-          { urls: 'stun:stun.cloudflare.com:3478' }
-        ]
-      }
+      stream: streamToSend 
     });
     
     let reconnectTimeout = null;
