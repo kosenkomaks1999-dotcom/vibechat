@@ -508,6 +508,15 @@ document.addEventListener("DOMContentLoaded", async () => {
             const deviceId = devices.getSelectedMicId();
             webrtc.initMicrophone(deviceId, muted).then(() => {
               updateSpeechDetector();
+              
+              // Запускаем слушатели ПОСЛЕ инициализации микрофона
+              setupListeners();
+              
+              // Запускаем детектор речи
+              if (speechDetector && typeof speechDetector.startDetection === 'function') {
+                speechDetector.startDetection();
+                console.log('✅ Детектор речи запущен после входа в комнату');
+              }
             }).catch(err => {
               console.error('Ошибка инициализации микрофона:', err);
             });
@@ -530,16 +539,9 @@ document.addEventListener("DOMContentLoaded", async () => {
               connectionManager.init();
             }
             
-            // Запускаем слушатели, heartbeat и проверку присутствия
-            setupListeners();
+            // Запускаем heartbeat и проверку присутствия
             startHeartbeat();
             startPresenceCheck();
-            
-            // Запускаем детектор речи
-            if (speechDetector && typeof speechDetector.startDetection === 'function') {
-              speechDetector.startDetection();
-              console.log('✅ Детектор речи запущен после входа в комнату');
-            }
           };
           
           roomsManager.callbacks.onLeft = () => {
