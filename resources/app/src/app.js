@@ -27,7 +27,7 @@ import { FirebaseListenersManager } from './utils/firebase-listeners.js';
 
 document.addEventListener("DOMContentLoaded", async () => {
   // Версия приложения для отладки
-  const APP_VERSION = '1.0.17';
+  const APP_VERSION = '1.0.19';
   
   // 🚨 КРИТИЧНО: Отключаем избыточное логирование для производительности
   const DEBUG_MODE = false; // Установите true для отладки
@@ -2068,6 +2068,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Переинициализируем слушатели
       setupListeners();
       
+      // Запускаем heartbeat и проверку присутствия после переподключения
+      startHeartbeat();
+      startPresenceCheck();
+      
       // 🔧 FIX: Запускаем детектор речи после переподключения
       if (speechDetector && typeof speechDetector.startDetection === 'function') {
         speechDetector.startDetection();
@@ -2108,7 +2112,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     heartbeatInterval = setInterval(() => {
       if (myUserRef && joined) {
         // Обновляем lastActive для поддержания активности соединения
-        myUserRef.child('lastActive').set(firebase.database.ServerValue.TIMESTAMP)
+        const timestamp = Date.now();
+        myUserRef.child('lastActive').set(timestamp)
           .then(() => {
             // Дополнительно обновляем onDisconnect handler для продления времени жизни
             myUserRef.onDisconnect().remove();
@@ -2169,7 +2174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
               mute: muted,
               speakerMuted: speakerMuted,
               userId: firebaseUserId,
-              lastActive: firebase.database.ServerValue.TIMESTAMP
+              lastActive: Date.now()
             });
             
             // Восстанавливаем onDisconnect

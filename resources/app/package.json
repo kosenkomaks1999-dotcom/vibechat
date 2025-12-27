@@ -1,6 +1,6 @@
 {
   "name": "voice-chat",
-  "version": "1.0.15",
+  "version": "1.0.17",
   "description": "Voice chat with modern UI",
   "main": "main.cjs",
   "type": "module",

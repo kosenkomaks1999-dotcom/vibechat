@@ -141,6 +141,21 @@ export class WhiteboardManager {
     this.modal.style.display = 'flex';
     this.isOpen = true;
     
+    // Изменяем размер canvas под окно с соотношением 16:9
+    this.resizeTimeout = setTimeout(() => {
+      if (this.isOpen && this.resizeCanvas && typeof this.resizeCanvas === 'function') {
+        this.resizeCanvas();
+      }
+    }, 100);
+    
+    // Добавляем обработчик изменения размера окна
+    this.resizeHandler = () => {
+      if (this.isOpen && this.resizeCanvas && typeof this.resizeCanvas === 'function') {
+        this.resizeCanvas();
+      }
+    };
+    window.addEventListener('resize', this.resizeHandler);
+    
     // Инициализируем DrawingEngine
     this.drawingEngine = new DrawingEngine(
       this.canvas,
@@ -185,6 +200,18 @@ export class WhiteboardManager {
     
     this.modal.style.display = 'none';
     this.isOpen = false;
+    
+    // Отменяем таймер resize если он есть
+    if (this.resizeTimeout) {
+      clearTimeout(this.resizeTimeout);
+      this.resizeTimeout = null;
+    }
+    
+    // Удаляем обработчик изменения размера окна
+    if (this.resizeHandler) {
+      window.removeEventListener('resize', this.resizeHandler);
+      this.resizeHandler = null;
+    }
     
     // КРИТИЧЕСКИ ВАЖНО: Останавливаем слушатель Firebase
     this.stopListening();
@@ -268,15 +295,11 @@ export class WhiteboardManager {
 
   /**
    * Устанавливает размер кисти
-   * @param {number} size - 10-50 (убрали pen, минимум 10)
+   * @param {number} size - 10-50
    */
   setSize(size) {
-    // Ограничиваем размер в зависимости от инструмента
-    if (this.currentTool === 'marker') {
-      size = Math.max(10, Math.min(30, size));
-    } else if (this.currentTool === 'eraser') {
-      size = Math.max(10, Math.min(50, size));
-    }
+    // Ограничиваем размер для всех инструментов одинаково
+    size = Math.max(10, Math.min(50, size));
     
     this.currentSize = size;
     
@@ -603,8 +626,8 @@ export class WhiteboardManager {
     // Проверяем, что координаты числа
     if (typeof x !== 'number' || typeof y !== 'number') return false;
     
-    // Проверяем, что координаты в пределах canvas
-    if (x < 0 || x > CANVAS_WIDTH || y < 0 || y > CANVAS_HEIGHT) return false;
+    // Проверяем, что координаты в пределах canvas (используем текущие размеры)
+    if (x < 0 || x > this.canvas.width || y < 0 || y > this.canvas.height) return false;
     
     // Проверяем, что координаты не NaN или Infinity
     if (!isFinite(x) || !isFinite(y)) return false;
@@ -1033,9 +1056,19 @@ export class DrawingEngine {
       clientY = e.clientY;
     }
     
+    // Вычисляем координаты относительно canvas (CSS размер)
+    const canvasX = clientX - rect.left;
+    const canvasY = clientY - rect.top;
+    
+    // Пересчитываем координаты с учетом масштабирования
+    // rect.width/height - отображаемый размер (CSS)
+    // canvas.width/height - внутреннее разрешение
+    const scaleX = this.canvas.width / rect.width;
+    const scaleY = this.canvas.height / rect.height;
+    
     return {
-      x: clientX - rect.left,
-      y: clientY - rect.top
+      x: canvasX * scaleX,
+      y: canvasY * scaleY
     };
   }
 
@@ -1159,8 +1192,8 @@ export class DrawingEngine {
     // Проверяем, что координаты числа
     if (typeof x !== 'number' || typeof y !== 'number') return false;
     
-    // Проверяем, что координаты в пределах canvas
-    if (x < 0 || x > CANVAS_WIDTH || y < 0 || y > CANVAS_HEIGHT) return false;
+    // Проверяем, что координаты в пределах canvas (используем текущие размеры)
+    if (x < 0 || x > this.canvas.width || y < 0 || y > this.canvas.height) return false;
     
     // Проверяем, что координаты не NaN или Infinity
     if (!isFinite(x) || !isFinite(y)) return false;
@@ -1344,6 +1377,68 @@ export class DrawingEngine {
     };
     
     requestAnimationFrame(drawBatch);
+  }
+
+  /**
+   * Изменяет размер canvas с сохранением соотношения 16:9
+   */
+  resizeCanvas() {
+    if (!this.canvas || !this.modal) return;
+    
+    const container = this.canvas.parentElement;
+    if (!container) return;
+    
+    // Получаем размеры контейнера
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.clientHeight;
+    
+    // Вычисляем размеры canvas с соотношением 16:9
+    let canvasWidth, canvasHeight;
+    const aspectRatio = 16 / 9;
+    
+    if (containerWidth / containerHeight > aspectRatio) {
+      // Контейнер шире чем нужно - ограничиваем по высоте
+      canvasHeight = containerHeight;
+      canvasWidth = canvasHeight * aspectRatio;
+    } else {
+      // Контейнер выше чем нужно - ограничиваем по ширине
+      canvasWidth = containerWidth;
+      canvasHeight = canvasWidth / aspectRatio;
+    }
+    
+    // Округляем размеры
+    const newWidth = Math.floor(canvasWidth);
+    const newHeight = Math.floor(canvasHeight);
+    
+    // Проверяем, нужно ли изменять размер
+    if (this.canvas.width === newWidth && this.canvas.height === newHeight) {
+      return; // Размер не изменился
+    }
+    
+    // Сохраняем текущие штрихи
+    const savedStrokes = [...this.strokes];
+    
+    // Устанавливаем новые размеры (это очистит canvas)
+    this.canvas.width = newWidth;
+    this.canvas.height = newHeight;
+    
+    // Устанавливаем CSS размеры
+    this.canvas.style.width = newWidth + 'px';
+    this.canvas.style.height = newHeight + 'px';
+    
+    // Заливаем белым фоном
+    this.context.fillStyle = '#FFFFFF';
+    this.context.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    
+    // Перерисовываем все штрихи
+    if (savedStrokes.length > 0) {
+      console.log(`Redrawing ${savedStrokes.length} strokes after resize`);
+      savedStrokes.forEach(stroke => {
+        this.drawStroke(stroke);
+      });
+    }
+    
+    console.log(`Canvas resized to ${this.canvas.width}x${this.canvas.height}`);
   }
 
   /**

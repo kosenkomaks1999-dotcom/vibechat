@@ -1,7 +1,7 @@
 // Загружаем переменные окружения из .env файла
 require('dotenv').config();
 
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
 const { existsSync, mkdirSync } = require('fs');
@@ -9,13 +9,13 @@ const AppUpdater = require('./updater.cjs');
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 500,       // Начальная ширина для окна авторизации
-    height: 750,      // Начальная высота для окна авторизации (увеличено для формы регистрации с 4 полями)
-    minWidth: 500,
-    minHeight: 750,
+    width: 1200,      // Начальная ширина
+    height: 720,      // Начальная высота
+    minWidth: 1000,   // Минимальная ширина
+    minHeight: 600,   // Минимальная высота
     // Убраны ограничения maxWidth/maxHeight - теперь можно изменять размер
     frame: false,     // убираем стандартный title bar
-    resizable: false, // Начинаем с фиксированного размера (будет изменен после авторизации)
+    resizable: true,  // Разрешаем изменение размера
     icon: path.join(__dirname, 'assets', 'icons', 'icon.png'), // Иконка окна приложения
     webPreferences: {
       // Улучшенная безопасность: отключаем прямой доступ к Node.js
@@ -38,6 +38,25 @@ function createWindow() {
     win.webContents.openDevTools();
     console.log('🔧 DevTools открыты (режим разработки)');
   }
+
+  // Открываем внешние ссылки в системном браузере
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    // Проверяем, что это внешняя ссылка (http/https)
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+      return { action: 'deny' }; // Предотвращаем открытие в Electron
+    }
+    return { action: 'allow' };
+  });
+
+  // Перехватываем клики по ссылкам для открытия в системном браузере
+  win.webContents.on('will-navigate', (event, url) => {
+    // Если это внешняя ссылка, открываем в системном браузере
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
 
   // Обработчик для закрытия окна
   ipcMain.on('close-window', () => {
@@ -76,6 +95,8 @@ function createWindow() {
   ipcMain.on('set-window-size', (event, width, height, center = true) => {
     if (win && !win.isDestroyed()) {
       win.setSize(width, height, false);
+      // Устанавливаем минимальные размеры для окна авторизации
+      win.setMinimumSize(500, 550);
       if (center) {
         win.center();
       }
@@ -166,6 +187,8 @@ ipcMain.handle('get-log-file-path', async (event) => {
   return getLogFilePath();
 });
 
+
+
 // Функция получения пути к файлу логов комнат
 function getRoomLogFilePath() {
   try {
@@ -210,6 +233,8 @@ ipcMain.handle('write-room-log', async (event, logLine) => {
 // Инициализация путей к логам будет выполнена после app.whenReady()
 
 let updater = null;
+
+
 
 app.whenReady().then(async () => {
   // Инициализируем систему логирования после готовности app

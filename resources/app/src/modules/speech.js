@@ -183,6 +183,16 @@ export class SpeechDetector {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
+    
+    // 🔧 FIX: Очищаем все состояния говорящих при остановке
+    Object.keys(this.speakingStates).forEach(userId => {
+      if (this.speakingStates[userId]) {
+        this.speakingStates[userId] = false;
+        if (this.onSpeakingChange) {
+          this.onSpeakingChange(userId, false);
+        }
+      }
+    });
   }
 }
 

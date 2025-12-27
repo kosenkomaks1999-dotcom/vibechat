@@ -46,5 +46,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Слушатель статуса обновлений
   onUpdateStatus: (callback) => ipcRenderer.on('update-status', (event, status, data) => callback(status, data)),
+  
 });
 

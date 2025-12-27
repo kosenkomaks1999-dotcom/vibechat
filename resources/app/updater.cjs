@@ -136,7 +136,7 @@ class AppUpdater {
     this.sendStatusToWindow('downloading', { percent: 0 });
     
     // Напрямую скачиваем последний релиз с GitHub
-    const downloadUrl = 'https://github.com/kosenkomaks1999-dotcom/vibechat/releases/latest/download/VibeChat-Setup-1.0.15.exe';
+    const downloadUrl = 'https://github.com/kosenkomaks1999-dotcom/vibechat/releases/latest/download/VibeChat-Setup-1.0.17.exe';
     
     console.log('📥 Скачивание установщика с:', downloadUrl);
     
